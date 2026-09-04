@@ -1,6 +1,12 @@
 package com.example.incremental.runtime;
 
 import com.example.incremental.config.DemoProperties;
+import com.example.incremental.persistence.agent.AgentHistoryService;
+import com.example.incremental.persistence.agent.AgentMessageRole;
+import com.example.incremental.persistence.agent.AgentMessageStatus;
+import com.example.incremental.persistence.agent.AgentRun;
+import com.example.incremental.persistence.agent.AgentRunEventType;
+import com.example.incremental.persistence.agent.AgentRunStatus;
 import com.example.incremental.writing.ChapterStage;
 import com.example.incremental.writing.ChapterStageStatus;
 import com.example.incremental.writing.ContentEntry;
@@ -13,9 +19,12 @@ import com.example.incremental.writing.WritingAgent;
 import com.example.incremental.writing.WritingRunCommand;
 import com.example.incremental.writing.WritingToolContext;
 import io.agentscope.core.agui.event.AguiEvent;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.ObjectProvider;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 import org.springframework.util.StringUtils;
@@ -26,6 +35,7 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.stream.Collectors;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -36,11 +46,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class RoundRunner {
 
     private static final Logger log = LoggerFactory.getLogger(RoundRunner.class);
+    private static final String WRITING_AGENT_ID = "incremental-writing-agent";
 
     private final TaskWorkspaceService workspaceService;
     private final ChapterStageCoordinator chapterStageCoordinator;
     private final AgentRunRuntime agentRunRuntime;
     private final WritingAgent writingAgent;
+    private final ObjectProvider<AgentHistoryService> agentHistoryServiceProvider;
+    private final ObjectMapper objectMapper;
     private final Path stateRoot;
     private final Set<String> runningTasks = ConcurrentHashMap.newKeySet();
 
@@ -49,11 +62,15 @@ public class RoundRunner {
             ChapterStageCoordinator chapterStageCoordinator,
             AgentRunRuntime agentRunRuntime,
             WritingAgent writingAgent,
+            ObjectProvider<AgentHistoryService> agentHistoryServiceProvider,
+            ObjectMapper objectMapper,
             DemoProperties properties) {
         this.workspaceService = workspaceService;
         this.chapterStageCoordinator = chapterStageCoordinator;
         this.agentRunRuntime = agentRunRuntime;
         this.writingAgent = writingAgent;
+        this.agentHistoryServiceProvider = agentHistoryServiceProvider;
+        this.objectMapper = objectMapper;
         this.stateRoot = properties.getStateRoot().toAbsolutePath().normalize();
     }
 
@@ -91,6 +108,7 @@ public class RoundRunner {
                         : openStage.isComplete()
                                 ? WritingRunCommand.requestChapterCommit(openStage.stageId())
                                 : WritingRunCommand.recoverStage(openStage.stageId());
+                PersistentRunContext persistentRun = beginPersistentRun(task, runId, message);
                 log.info("Writing round starting: taskId={}, chapterSessionId={}, runId={}",
                         taskId, chapterSessionId, runId);
 
@@ -101,7 +119,8 @@ public class RoundRunner {
                                     new AguiEvent.RunStarted(chapterSessionId, runId),
                                     chapterSavedEvent(chapterSessionId, runId, taskId, recoveredCommit),
                                     new AguiEvent.RunFinished(chapterSessionId, runId));
-                    return agentRunRuntime.track(taskId, chapterSessionId, runId, recoveredEvents)
+                    return agentRunRuntime.track(taskId, chapterSessionId, runId,
+                                    persistRunEvents(persistentRun, recoveredEvents))
                             .doFinally(signal -> {
                                 runningTasks.remove(taskId);
                                 log.info("Writing round finished: taskId={}, signal={}", taskId, signal);
@@ -110,9 +129,9 @@ public class RoundRunner {
 
                 Flux<AguiEvent> agentEvents = finishAgentEvents(taskId, chapterSessionId, runId, toolContext,
                         Flux.defer(() -> writingAgent.streamRound(task, chapterSessionId, runId, command, toolContext)));
-                return agentRunRuntime.track(taskId, chapterSessionId, runId, agentEvents)
+                return agentRunRuntime.track(taskId, chapterSessionId, runId, persistRunEvents(persistentRun, agentEvents))
                         .onErrorResume(error -> retryCompleteStageCommit(
-                                taskId, task, chapterSessionId, runId, error))
+                                taskId, task, chapterSessionId, runId, error, persistentRun))
                         .doFinally(signal -> {
                             runningTasks.remove(taskId);
                             log.info("Writing round finished: taskId={}, signal={}", taskId, signal);
@@ -130,7 +149,8 @@ public class RoundRunner {
             WritingTask task,
             String chapterSessionId,
             String failedRunId,
-            Throwable error) {
+            Throwable error,
+            PersistentRunContext persistentRun) {
         ChapterStage stage = chapterStageCoordinator.findOpenStage(taskId);
         if (stage == null || !stage.isComplete()) {
             return Flux.just(new AguiEvent.RunError(chapterSessionId, failedRunId,
@@ -139,6 +159,7 @@ public class RoundRunner {
         String retryRunId = "writing-" + taskId + "-" + UUID.randomUUID();
         WritingToolContext retryContext = new WritingToolContext(taskId, stage);
         WritingRunCommand retryCommand = WritingRunCommand.requestChapterCommit(stage.stageId());
+        PersistentRunContext retryPersistentRun = beginRetryPersistentRun(persistentRun, retryRunId);
         log.warn("Writing round retrying commit request: taskId={}, failedRunId={}, retryRunId={}",
                 taskId, failedRunId, retryRunId, error);
         Flux<AguiEvent> retryEvents = finishAgentEvents(taskId, chapterSessionId, retryRunId, retryContext,
@@ -147,7 +168,8 @@ public class RoundRunner {
                         Flux.just(new AguiEvent.Custom(chapterSessionId, retryRunId, "run.retry", Map.of(
                                 "failedRunId", failedRunId,
                                 "reason", safeMessage(error)))),
-                        agentRunRuntime.track(taskId, chapterSessionId, retryRunId, retryEvents)
+                        agentRunRuntime.track(taskId, chapterSessionId, retryRunId,
+                                        persistRunEvents(retryPersistentRun, retryEvents))
                                 .onErrorResume(retryError -> Flux.just(new AguiEvent.RunError(
                                         chapterSessionId, retryRunId,
                                         "自动重试失败：" + safeMessage(retryError), "RETRY_FAILED"))));
@@ -159,6 +181,7 @@ public class RoundRunner {
                 return Flux.error(new IllegalStateException("该写作任务已有一轮正在运行"));
             }
             try {
+                WritingTask task = workspaceService.getTaskView(taskId).task();
                 ChapterStage stage = chapterStageCoordinator.findOpenStage(taskId);
                 if (stage == null || stage.status() != ChapterStageStatus.AWAITING_REVIEW) {
                     throw new IllegalStateException("当前没有等待审核的 ChapterStage");
@@ -183,21 +206,27 @@ public class RoundRunner {
                     feedback = "";
                 }
                 AgentRunRuntime.ResumeRequest resume = agentRunRuntime.prepareResume(taskId, interruptedRunId, decisions);
+                PersistentRunContext persistentRun = findPersistentRun(interruptedRunId);
                 if (revisionRequested) {
                     chapterStageCoordinator.reject(taskId, stage.stageId());
                     agentRunRuntime.completeResume(interruptedRunId);
-                    WritingTask task = workspaceService.getTaskView(taskId).task();
+                    if (persistentRun != null) {
+                        persistentRun.historyService().updateRunStatus(
+                                interruptedRunId, AgentRunStatus.CANCELLED, null, null);
+                    }
                     String rewriteRunId = "writing-" + taskId + "-" + UUID.randomUUID();
                     String rewriteMessage = "用户未通过当前章节候选，请在同一章节内根据以下审核意见重写；"
                             + "此前候选未提交，不得将其视为已完成内容。\n\n审核意见：\n" + feedback;
                     WritingToolContext rewriteContext = new WritingToolContext(taskId);
+                    PersistentRunContext rewritePersistentRun = beginPersistentRun(task, rewriteRunId, feedback);
                     Flux<AguiEvent> rewriteEvents = finishAgentEvents(taskId, resume.threadId(), rewriteRunId,
                             rewriteContext, Flux.defer(() -> writingAgent.streamRound(task, resume.threadId(),
                                     rewriteRunId, WritingRunCommand.writeChapter(rewriteMessage), rewriteContext)));
                     return Flux.concat(
                                     Flux.just(new AguiEvent.Custom(resume.threadId(), interruptedRunId,
                                             "chapter.revision_requested", Map.of("stageId", stage.stageId()))),
-                                    agentRunRuntime.track(taskId, resume.threadId(), rewriteRunId, rewriteEvents))
+                                    agentRunRuntime.track(taskId, resume.threadId(), rewriteRunId,
+                                            persistRunEvents(rewritePersistentRun, rewriteEvents)))
                             .doFinally(signal -> {
                                 runningTasks.remove(taskId);
                                 log.info("Writing revision finished: taskId={}, runId={}, signal={}",
@@ -207,10 +236,15 @@ public class RoundRunner {
                 try {
                     ChapterStageCoordinator.ChapterCommit commit = chapterStageCoordinator.commitIfComplete(taskId, stage);
                     agentRunRuntime.completeResume(interruptedRunId);
+                    if (persistentRun != null) {
+                        persistentRun.historyService().updateRunStatus(
+                                interruptedRunId, AgentRunStatus.RUNNING, null, null);
+                    }
                     return Flux.<AguiEvent>just(
                                     new AguiEvent.RunStarted(resume.threadId(), interruptedRunId),
                                     chapterSavedEvent(resume.threadId(), interruptedRunId, taskId, commit),
                                     new AguiEvent.RunFinished(resume.threadId(), interruptedRunId))
+                            .transform(events -> persistRunEvents(persistentRun, events))
                             .doFinally(signal -> {
                                 runningTasks.remove(taskId);
                                 log.info("Writing resume finished: taskId={}, runId={}, signal={}",
@@ -268,9 +302,157 @@ public class RoundRunner {
                             }
                             return Flux.just(event);
                         })
-                        .doOnNext(event -> log.info("Writing round event: taskId={}, type={}, runId={}",
-                                taskId, event.getType(), event.getRunId()))
                         .doOnError(error -> log.error("Writing round failed: taskId={}", taskId, error));
+    }
+
+    private PersistentRunContext beginPersistentRun(WritingTask task, String runId, String userMessage) {
+        AgentHistoryService historyService = agentHistoryServiceProvider.getIfAvailable();
+        if (historyService == null) {
+            return null;
+        }
+        historyService.getOrCreateConversation(task.id(), null, task.userId(), WRITING_AGENT_ID,
+                "写作任务 " + task.id());
+        String content = StringUtils.hasText(userMessage) ? userMessage : "继续";
+        var message = historyService.saveMessage(task.id(), null, AgentMessageRole.USER, content, null,
+                AgentMessageStatus.COMPLETED);
+        historyService.createRun(runId, task.id(), WRITING_AGENT_ID, message.id());
+        return new PersistentRunContext(historyService, task.id(), message.id(), runId);
+    }
+
+    private PersistentRunContext beginRetryPersistentRun(PersistentRunContext persistentRun, String retryRunId) {
+        if (persistentRun == null) {
+            return null;
+        }
+        persistentRun.historyService().createRun(retryRunId, persistentRun.conversationId(), WRITING_AGENT_ID,
+                persistentRun.triggerMessageId());
+        return new PersistentRunContext(persistentRun.historyService(), persistentRun.conversationId(),
+                persistentRun.triggerMessageId(), retryRunId);
+    }
+
+    private PersistentRunContext findPersistentRun(String runId) {
+        AgentHistoryService historyService = agentHistoryServiceProvider.getIfAvailable();
+        if (historyService == null) {
+            return null;
+        }
+        AgentRun run = historyService.findRun(runId);
+        return run == null ? null : new PersistentRunContext(
+                historyService, run.conversationId(), run.triggerMessageId(), run.id());
+    }
+
+    private Flux<AguiEvent> persistRunEvents(PersistentRunContext persistentRun, Flux<AguiEvent> events) {
+        if (persistentRun == null) {
+            return events;
+        }
+        StringBuilder assistantContent = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
+        AtomicBoolean finalized = new AtomicBoolean();
+        return events.doOnNext(event -> {
+            if (event instanceof AguiEvent.TextMessageContent content) {
+                assistantContent.append(content.delta());
+                return;
+            }
+            if (event instanceof AguiEvent.ReasoningMessageContent content) {
+                reasoning.append(content.delta());
+                return;
+            }
+            if (event instanceof AguiEvent.RunStarted) {
+                persistentRun.historyService().updateRunStatus(event.getRunId(), AgentRunStatus.RUNNING, null, null);
+                persistentRun.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_STARTED,
+                        eventPayload(event), null, null, null);
+                return;
+            }
+            if (event instanceof AguiEvent.ToolCallStart toolCall) {
+                persistentRun.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.TOOL_CALL,
+                        eventPayload(event, "toolName", toolCall.toolCallName()), null, null, toolCall.toolCallId());
+                return;
+            }
+            if (event instanceof AguiEvent.ToolCallResult toolResult) {
+                persistentRun.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.TOOL_RESULT,
+                        eventPayload(event, "content", toolResult.content()), null, null, toolResult.toolCallId());
+                return;
+            }
+            if (event instanceof AguiEvent.RunError error) {
+                persistAssistantMessage(persistentRun, event.getRunId(), assistantContent, AgentMessageStatus.FAILED);
+                persistentRun.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_FAILED,
+                        eventPayload(event, "errorCode", error.code(), "errorMessage", error.message()),
+                        null, null, null);
+                persistentRun.historyService().updateRunStatus(event.getRunId(), AgentRunStatus.FAILED,
+                        error.code(), error.message());
+                finalized.set(true);
+                return;
+            }
+            if (event instanceof AguiEvent.RunFinished finished) {
+                persistReasoningSummary(persistentRun, event.getRunId(), reasoning);
+                if (finished.outcome() instanceof AguiEvent.RunFinishedInterruptOutcome outcome) {
+                    outcome.interrupts().forEach(interrupt -> persistentRun.historyService().saveRunEvent(
+                            event.getRunId(), AgentRunEventType.REQUIRE_CONFIRM,
+                            eventPayload(event, "interruptId", interrupt.id(), "toolName",
+                                    interrupt.metadata() == null ? null : interrupt.metadata().get("toolName")),
+                            null, null, interrupt.toolCallId()));
+                    persistentRun.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_FINISHED,
+                            eventPayload(event, "outcome", "WAITING"), null, null, null);
+                    persistAssistantMessage(persistentRun, event.getRunId(), assistantContent, AgentMessageStatus.COMPLETED);
+                    persistentRun.historyService().updateRunStatus(event.getRunId(), AgentRunStatus.WAITING, null, null);
+                } else {
+                    persistentRun.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_FINISHED,
+                            eventPayload(event, "outcome", "COMPLETED"), null, null, null);
+                    persistAssistantMessage(persistentRun, event.getRunId(), assistantContent, AgentMessageStatus.COMPLETED);
+                    persistentRun.historyService().updateRunStatus(event.getRunId(), AgentRunStatus.COMPLETED, null, null);
+                }
+                finalized.set(true);
+            }
+        }).doOnError(error -> {
+            if (finalized.compareAndSet(false, true)) {
+                persistAssistantMessage(persistentRun, persistentRun.runId(), assistantContent, AgentMessageStatus.FAILED);
+                persistentRun.historyService().saveRunEvent(persistentRun.runId(), AgentRunEventType.RUN_FAILED,
+                        eventPayload(null, "errorMessage", safeMessage(error)), null, null, null);
+                persistentRun.historyService().updateRunStatus(persistentRun.runId(), AgentRunStatus.FAILED,
+                        "RUN_FAILED", safeMessage(error));
+            }
+        });
+    }
+
+    private void persistReasoningSummary(
+            PersistentRunContext persistentRun, String runId, StringBuilder reasoning) {
+        if (reasoning.isEmpty()) {
+            return;
+        }
+        persistentRun.historyService().saveRunEvent(runId, AgentRunEventType.REASONING_SUMMARY,
+                eventPayload(null, "content", reasoning.toString()), null, null, null);
+    }
+
+    private void persistAssistantMessage(
+            PersistentRunContext persistentRun, String runId, StringBuilder content, AgentMessageStatus status) {
+        if (!content.isEmpty()) {
+            persistentRun.historyService().saveMessage(persistentRun.conversationId(), runId,
+                    AgentMessageRole.ASSISTANT, content.toString(), null, status);
+        }
+    }
+
+    private String eventPayload(AguiEvent event, Object... fields) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (event != null) {
+            payload.put("type", event.getType().name());
+            payload.put("threadId", event.getThreadId());
+            payload.put("timestamp", event.timestamp());
+        }
+        for (int index = 0; index < fields.length; index += 2) {
+            if (fields[index + 1] != null) {
+                payload.put((String) fields[index], fields[index + 1]);
+            }
+        }
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("序列化 Agent Run 事件失败", e);
+        }
+    }
+
+    private record PersistentRunContext(
+            AgentHistoryService historyService,
+            String conversationId,
+            String triggerMessageId,
+            String runId) {
     }
 
     private String safeMessage(Throwable error) {
@@ -315,4 +497,3 @@ public class RoundRunner {
         }
     }
 }
-

@@ -42,6 +42,12 @@ public class AgentHistoryService {
 
     @Transactional
     public AgentConversation createConversation(String tenantId, String userId, String agentId, String title) {
+        return createConversation(UUID.randomUUID().toString(), tenantId, userId, agentId, title);
+    }
+
+    @Transactional
+    public AgentConversation createConversation(String conversationId, String tenantId, String userId, String agentId, String title) {
+        requireText(conversationId, "conversationId", 64);
         requireText(userId, "userId", 64);
         requireText(agentId, "agentId", 64);
         requireText(title, "title", 500);
@@ -50,10 +56,23 @@ public class AgentHistoryService {
         }
         Instant now = Instant.now();
         AgentConversation conversation = new AgentConversation(
-                UUID.randomUUID().toString(), tenantId, userId, agentId, title,
+                conversationId, tenantId, userId, agentId, title,
                 ConversationStatus.ACTIVE, now, now);
         conversationMapper.insert(conversation);
         return conversation;
+    }
+
+    @Transactional
+    public AgentConversation getOrCreateConversation(
+            String conversationId, String tenantId, String userId, String agentId, String title) {
+        AgentConversation existing = conversationMapper.findById(conversationId);
+        return existing == null ? createConversation(conversationId, tenantId, userId, agentId, title) : existing;
+    }
+
+    @Transactional(readOnly = true)
+    public AgentRun findRun(String runId) {
+        requireText(runId, "runId", 128);
+        return runMapper.findById(runId);
     }
 
     @Transactional

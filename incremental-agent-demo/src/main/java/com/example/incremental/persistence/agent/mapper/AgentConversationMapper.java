@@ -22,6 +22,9 @@ public interface AgentConversationMapper {
     @Select("SELECT * FROM agent_conversation WHERE id = #{id} FOR UPDATE")
     AgentConversation lockById(@Param("id") String id);
 
+    @Select("SELECT * FROM agent_conversation WHERE id = #{id}")
+    AgentConversation findById(@Param("id") String id);
+
     @Update("UPDATE agent_conversation SET updated_at = #{updatedAt} WHERE id = #{id}")
     int touch(@Param("id") String id, @Param("updatedAt") java.time.Instant updatedAt);
 
