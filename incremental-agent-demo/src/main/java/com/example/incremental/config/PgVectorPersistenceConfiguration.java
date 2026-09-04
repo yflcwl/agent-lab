@@ -1,19 +1,22 @@
 package com.example.incremental.config;
 
 import com.example.incremental.rag.mapper.TaskRagChunkMapper;
+import com.example.incremental.persistence.agent.mapper.AgentHistorySchemaMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.util.StringUtils;
 
 import javax.sql.DataSource;
 
 @Configuration
 @ConditionalOnProperty(name = "demo.rag-store", havingValue = "pgvector")
-@MapperScan("com.example.incremental.rag.mapper")
+@MapperScan({"com.example.incremental.rag.mapper", "com.example.incremental.persistence.agent.mapper"})
 public class PgVectorPersistenceConfiguration {
 
     @Bean(destroyMethod = "close")
@@ -31,8 +34,17 @@ public class PgVectorPersistenceConfiguration {
     }
 
     @Bean
-    ApplicationRunner initializePgVectorSchema(TaskRagChunkMapper ragChunkMapper, DemoProperties properties) {
+    ApplicationRunner initializePgVectorSchema(
+            DataSource pgVectorDataSource,
+            TaskRagChunkMapper ragChunkMapper,
+            AgentHistorySchemaMapper agentHistorySchemaMapper,
+            DemoProperties properties) {
         return args -> {
+            new ResourceDatabasePopulator(new ClassPathResource("db/migration/V1__agent_history.sql"))
+                    .execute(pgVectorDataSource);
+            if (!agentHistorySchemaMapper.hasMessageRunForeignKey()) {
+                agentHistorySchemaMapper.addMessageRunForeignKey();
+            }
             ragChunkMapper.createVectorExtension();
             ragChunkMapper.createTable(properties.getRagEmbeddingDimensions());
             ragChunkMapper.createTaskIndex();

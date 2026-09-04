@@ -66,7 +66,7 @@ public class WritingAgentConfiguration {
                 .toolkit(toolkit)
                 .permissionContext(writingPermissionContext)
                 .enablePendingToolRecovery(true)
-                .maxIters(20)
+                .maxIters(15)
                 .disableFilesystemTools()
                 .disableMemoryHooks()
                 .disableMemoryTools()
