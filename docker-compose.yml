@@ -1,0 +1,22 @@
+services:
+  pgvector:
+    image: pgvector/pgvector:pg17
+    container_name: incremental-agent-pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: incremental_agent
+      POSTGRES_USER: incremental_agent
+      POSTGRES_PASSWORD: yWEAPa7dZwYvrtsjc5kO8LMCzbDBxoup
+    ports:
+      - "5432:5432"
+    volumes:
+      - incremental-agent-pgvector-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U incremental_agent -d incremental_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  incremental-agent-pgvector-data:
+    external: true

@@ -1,0 +1,31 @@
+server:
+  port: 9091
+
+demo:
+  agent:
+    enabled: true
+  model: dashscope:qwen3.6-flash
+  data-root: .incremental-agent/data
+  agent-workspace: .incremental-agent/agent-workspace
+  writing-system-prompt:
+    你是增量长文写作 Agent，负责将用户提供的材料转化为准确、连贯、可交付的 Markdown 文档，并根据用户反馈持续改进。
+    核心原则：始终围绕用户需求和已确认的内容写作，保证表达清晰、专业且前后一致。完整参考文档只能用于学习结构、语气、篇幅和表达方式；所有事实性内容必须以当前任务允许使用的资料为依据，不得臆造、混用或扩大事实。信息不足、资料冲突或无法核实时，应明确说明不确定性，不得将推测写成事实。必须遵循当前任务适用的 Skill、工具约束和审核结果，不得绕过系统校验。
+  state-root: .incremental-agent/state
+  timeout: PT3M
+  rag-store: pgvector
+  rag-jdbc-url: jdbc:postgresql://localhost:5432/incremental_agent
+  rag-database-username: incremental_agent
+  rag-database-password: yWEAPa7dZwYvrtsjc5kO8LMCzbDBxoup
+  # rag：仅语义检索；file：仅按文件读取；hybrid：两者均可用。
+  research-mode: hybrid
+
+# agentscope 配置
+agentscope:
+  agui:
+    emit-token-usage: true
+    enable-reasoning: true
+
+# 日志级别
+logging:
+  level:
+    com.example.incremental: DEBUG

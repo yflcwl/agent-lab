@@ -1,0 +1,16 @@
+{
+  "runId" : "writing-dce8fc6c-36cf-4dca-8f73-2ca61299d3df-53e65e70-b8d4-4a0c-89ba-dc30587f26c3",
+  "correlationId" : "dce8fc6c-36cf-4dca-8f73-2ca61299d3df",
+  "threadId" : "writing-dce8fc6c-36cf-4dca-8f73-2ca61299d3df-chapter-003-active",
+  "status" : "RESUMING",
+  "pendingInterrupts" : [ {
+    "interruptId" : "call_c0a5fa8f16584e1689d80ec1",
+    "toolCallId" : "call_c0a5fa8f16584e1689d80ec1",
+    "toolName" : "commit_chapter",
+    "toolInput" : {
+      "stage_id" : "25ba7126-f12e-403e-8c62-bd32929989ca"
+    }
+  } ],
+  "createdAt" : 1788491258.726004200,
+  "updatedAt" : 1788491279.847298200
+}

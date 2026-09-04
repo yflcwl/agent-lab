@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>方案工坊 · Agent Writing Desk</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="grain"></div>
+<header class="masthead">
+    <div class="brand">
+        <span class="brand-mark">方</span>
+        <div>
+            <h1>方案工坊</h1>
+            <p class="subtitle">Agent Writing Desk</p>
+        </div>
+    </div>
+    <div class="masthead-actions">
+        <button class="new-task-button hidden" id="newTaskButton" type="button">＋ 新建任务</button>
+        <div class="connection" id="connectionState" data-state="idle">
+            <span class="connection-dot"></span>
+            <span>尚未连接</span>
+        </div>
+    </div>
+</header>
+
+<main>
+    <section class="create-panel" id="createPanel">
+        <div class="section-number">01</div>
+        <div class="create-copy">
+            <h2>建立一个写作目标</h2>
+            <p>输入目标与 Markdown 模板。外层管理任务，Agent 每次只处理一个章节。</p>
+        </div>
+        <form id="createForm">
+            <label>
+                <span>Goal</span>
+                <textarea id="goalInput" rows="3" required placeholder="例如：生成一份完整的智慧园区建设方案"></textarea>
+            </label>
+            <label>
+                <span>Markdown 模板</span>
+                <textarea id="templateInput" rows="12" required># 智慧园区建设方案
+
+## 1. 方案概述
+说明建设目标、范围和主要交付成果。
+
+## 2. 建设背景
+分析当前问题、业务诉求和约束条件。
+
+## 3. 总体架构
+给出总体技术架构和关键能力。
+</textarea>
+            </label>
+            <label>
+                <span>背景资料（必填，可多选）</span>
+                <input id="sourceFiles" type="file" accept=".pdf,.docx,.md,.txt" multiple required>
+            </label>
+            <button class="secondary-button template-button" id="airportTemplateButton" type="button">填入机场维修施工方案模板</button>
+            <button class="primary-button" type="submit">启动方案任务 <span>→</span></button>
+        </form>
+    </section>
+
+    <section class="workspace hidden" id="workspace">
+        <aside class="task-rail">
+            <div class="rail-heading">
+                <div class="rail-title">
+                    <p class="eyebrow">TASK LIST</p>
+                    <h2>章节任务</h2>
+                </div>
+                <button class="rail-toggle" id="taskRailToggle" type="button" aria-label="收起章节任务" aria-expanded="true">‹</button>
+            </div>
+            <div class="rail-content">
+                <div class="task-state-row">
+                    <span class="status-chip" id="overallStatus">RUNNING</span>
+                    <span>任务 #<b id="taskIdLabel">—</b></span>
+                </div>
+                <div class="task-meta">
+                    <span>计划版本</span>
+                    <span>v<b id="planVersion">0</b></span>
+                </div>
+                <div id="chapterList" class="chapter-list"></div>
+            </div>
+        </aside>
+
+        <section class="writing-stage">
+            <div class="decision-strip">
+                <span>最近决策</span>
+                <p id="lastDecision">正在等待 PlanningAgent...</p>
+            </div>
+
+            <article class="chapter-sheet">
+                <header>
+                    <p class="eyebrow" id="activeChapterKey">CURRENT CHAPTER</p>
+                    <h2 id="activeChapterTitle">等待章节生成</h2>
+                </header>
+                <pre id="chapterContent" class="markdown-view">Agent 完成当前任务后，章节内容会自动出现在这里。</pre>
+            </article>
+
+            <section class="review-panel hidden" id="reviewPanel">
+                <div>
+                    <p class="eyebrow">HUMAN REVIEW</p>
+                    <h3>这一章是否满足要求？</h3>
+                </div>
+                <p class="review-countdown" id="reviewCountdown" aria-live="polite">20 秒后自动通过</p>
+                <textarea id="feedbackInput" rows="4" placeholder="需要修改时，请填写具体意见"></textarea>
+                <div class="review-actions">
+                    <button class="secondary-button" id="reviseButton" type="button">要求修改</button>
+                    <button class="primary-button" id="approveButton" type="button">审核通过 <span>✓</span></button>
+                </div>
+            </section>
+
+            <section class="full-document">
+                <div class="document-heading">
+                    <div>
+                        <p class="eyebrow">LIVE DOCUMENT</p>
+                        <h3>完整方案</h3>
+                    </div>
+                    <button class="text-button" id="copyButton" type="button">复制 Markdown</button>
+                </div>
+                <pre id="fullContent" class="markdown-view compact">尚未生成内容。</pre>
+            </section>
+
+        </section>
+
+        <aside class="trace-panel">
+            <div class="document-heading trace-heading">
+                <div>
+                    <p class="eyebrow">AGENT TRACE</p>
+                    <h3>执行过程</h3>
+                </div>
+                <span class="live-badge"><i></i> LIVE</span>
+            </div>
+            <button class="secondary-button retry-button hidden" id="retryTaskButton" type="button">重新执行任务</button>
+            <details class="source-group">
+                <summary>已连接资料</summary>
+                <div id="sourceList" class="source-list"></div>
+            </details>
+            <div id="traceList" class="trace-list"></div>
+            <section class="task-chat" aria-label="任务对话">
+                <div class="chat-heading">
+                    <div>
+                        <p class="eyebrow">TASK CHAT</p>
+                        <h3>随时发送消息</h3>
+                    </div>
+                    <span class="chat-hint">安全检查点处理</span>
+                </div>
+                <div id="messageList" class="message-list" aria-live="polite"></div>
+                <form id="messageForm" class="message-form">
+                    <select id="messageType" aria-label="消息类型">
+                        <option value="QUESTION">对话提问</option>
+                        <option value="CHAPTER_INSTRUCTION">修改当前章</option>
+                        <option value="PLAN_INSTRUCTION">调整任务计划</option>
+                    </select>
+                    <textarea id="messageInput" rows="2" maxlength="4000" placeholder="执行过程中也可以发送问题或修改指令…" required></textarea>
+                    <button class="chat-send" type="submit">发送 <span>↗</span></button>
+                </form>
+            </section>
+        </aside>
+    </section>
+</main>
+
+<div class="toast hidden" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
