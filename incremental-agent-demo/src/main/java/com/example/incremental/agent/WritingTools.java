@@ -123,7 +123,9 @@ public class WritingTools {
     public String commitChapter(
             @ToolParam(name = "stage_id", description = "当前完整 ChapterStage 的 stageId") String stageId,
             WritingToolContext context) {
-        if (!context.stageId().equals(stageId)) {
+        if (!context.stageId().equals(stageId)
+                && (context.stage() == null || context.stage().content() == null
+                || !context.stage().content().filename().equals(stageId))) {
             throw new IllegalArgumentException("只能提交当前 ChapterStage: " + context.stageId());
         }
         ChapterStageCoordinator.ChapterCommit commit = chapterStageCoordinator.commitIfComplete(context.taskId(), context.stage());

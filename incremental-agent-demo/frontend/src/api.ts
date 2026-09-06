@@ -51,12 +51,13 @@ export async function consumeSse(
 
     while (true) {
         const {value, done} = await reader.read();
-        buffer += decoder.decode(value || new Uint8Array(), {stream: !done}).replace(/\r\n/g, "\n");
-        let boundary = buffer.indexOf("\n\n");
+        buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+        let boundary = buffer.search(/\r?\n\r?\n/);
         while (boundary >= 0) {
+            const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] || "\n\n";
             const frame = buffer.slice(0, boundary);
-            buffer = buffer.slice(boundary + 2);
-            const lines = frame.split("\n");
+            buffer = buffer.slice(boundary + separator.length);
+            const lines = frame.split(/\r?\n/);
             const eventType = lines.find(line => line.startsWith("event:"))?.slice(6).trim();
             const data = lines.filter(line => line.startsWith("data:"))
                 .map(line => line.slice(5).trimStart())
@@ -66,8 +67,16 @@ export async function consumeSse(
                 if (!event.type && eventType) event.type = eventType;
                 await onEvent(event);
             }
-            boundary = buffer.indexOf("\n\n");
+            boundary = buffer.search(/\r?\n\r?\n/);
         }
-        if (done) break;
+        if (done) {
+            const tail = buffer.trim();
+            if (tail) {
+                const data = tail.split(/\r?\n/).filter(line => line.startsWith("data:"))
+                    .map(line => line.slice(5).trimStart()).join("\n");
+                if (data) await onEvent(JSON.parse(data) as AguiEvent);
+            }
+            break;
+        }
     }
 }

@@ -131,6 +131,13 @@ public class AgentRunRuntime {
         transition(current, AgentRunStatus.AWAITING_CONFIRM, current.pendingInterrupts(), null, null);
     }
 
+    public void cancel(String runId) {
+        AgentRunRecord current = runs.find(runId);
+        if (!current.status().terminal()) {
+            transition(current, AgentRunStatus.CANCELLED, List.of(), "CLIENT_CANCELLED", "客户端取消了本轮执行");
+        }
+    }
+
     private void transitionForEvent(String runId, AguiEvent event) {
         if (!(event instanceof AguiEvent.RunStarted || event instanceof AguiEvent.RunError
                 || event instanceof AguiEvent.RunFinished)) return;

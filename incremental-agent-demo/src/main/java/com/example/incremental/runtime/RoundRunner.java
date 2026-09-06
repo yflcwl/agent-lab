@@ -50,7 +50,7 @@ public class RoundRunner {
                 return agentRunRuntime.start(run, history, events)
                         .onErrorResume(error -> retryCommit(prepared, run, error))
                         .doOnTerminate(() -> finish(taskId, "finished"))
-                        .doOnCancel(() -> finish(taskId, "cancelled"));
+                        .doOnCancel(() -> cancel(taskId, run, "cancelled"));
             } catch (RuntimeException error) {
                 agentRunRuntime.release(taskId);
                 log.warn("Writing round rejected: taskId={}, reason={}", taskId, error.getMessage());
@@ -81,7 +81,7 @@ public class RoundRunner {
                 }
                 return agentRunRuntime.continueRun(resume.run(), history, events)
                         .doOnTerminate(() -> finish(taskId, "resume finished"))
-                        .doOnCancel(() -> finish(taskId, "resume cancelled"));
+                        .doOnCancel(() -> cancel(taskId, resume.run(), "resume cancelled"));
             } catch (RuntimeException error) {
                 agentRunRuntime.release(taskId);
                 log.warn("Writing resume rejected: taskId={}, reason={}", taskId, error.getMessage());
@@ -119,6 +119,14 @@ public class RoundRunner {
     private void finish(String taskId, String state) {
         agentRunRuntime.release(taskId);
         log.info("Writing round {}: taskId={}", state, taskId);
+    }
+
+    private void cancel(String taskId, AgentRunContext run, String state) {
+        try {
+            agentRunRuntime.cancel(run.runId());
+        } finally {
+            finish(taskId, state);
+        }
     }
 
     private String messageOf(Throwable error) {

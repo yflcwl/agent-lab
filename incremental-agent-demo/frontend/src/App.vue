@@ -671,7 +671,7 @@ async function runRound(messageOverride?: string): Promise<void> {
 
     if (usesComposerMessage) messageInput.value = "";
     appendConversation(id, {id: newId(), kind: "user", text: message, meta: `Round ${contentCount.value + 1}`});
-    const stream = createStreamMessage();
+    const stream = reactive(createStreamMessage()) as StreamMessage;
     appendConversation(id, stream);
     scrollToLatest(true);
     running.value = true;
@@ -746,7 +746,7 @@ async function resumeReview(item: ReviewMessage, approved: boolean): Promise<voi
         });
         item.rejected = true;
     }
-    const stream = createStreamMessage();
+    const stream = reactive(createStreamMessage()) as StreamMessage;
     appendConversation(review.taskId, stream);
     scrollToLatest(true);
     item.status = approved ? "正在提交…" : "正在根据意见重写…";
