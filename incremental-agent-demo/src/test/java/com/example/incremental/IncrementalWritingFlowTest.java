@@ -336,11 +336,13 @@ class IncrementalWritingFlowTest {
                 List.of(new AgentRunDecision("tool-call-1", true))).collectList().block();
 
         assertThat(events).extracting(event -> event.getType().name())
-                .containsExactly("RUN_STARTED", "CUSTOM", "RUN_FINISHED");
+                .containsExactly("RUN_STARTED", "TEXT_MESSAGE_CONTENT", "CUSTOM", "RUN_FINISHED");
         assertThat(workspaceService.findOpenChapterStage(task.id())).isNull();
         assertThat(workspaceService.listContents(task.id())).hasSize(1);
         assertThat(agentRunRuntime.find(interruptedRunId).status().name()).isEqualTo("FINISHED");
-        assertThat(StubAgentConfiguration.sessions).hasSize(1);
+        assertThat(StubAgentConfiguration.sessions).hasSize(2).allMatch(session ->
+                session.equals(StubAgentConfiguration.sessions.getFirst()));
+        assertThat(events).allMatch(event -> interruptedRunId.equals(event.getRunId()));
     }
 
     @Test
@@ -357,15 +359,47 @@ class IncrementalWritingFlowTest {
                 .collectList().block();
 
         assertThat(events).extracting(event -> event.getType().name())
-                .containsExactly("CUSTOM", "RUN_STARTED", "TEXT_MESSAGE_CONTENT", "CUSTOM", "RUN_FINISHED");
+                .containsExactly("CUSTOM", "RUN_STARTED", "TEXT_MESSAGE_CONTENT", "RUN_FINISHED");
         assertThat(workspaceService.readChapterStage(task.id(), rejectedStageId)).contains("\"status\" : \"REJECTED\"");
-        assertThat(workspaceService.listContents(task.id())).singleElement()
-                .satisfies(content -> assertThat(content.title()).isEqualTo("实施安排"));
-        assertThat(agentRunRuntime.find(interruptedRunId).status().name()).isEqualTo("FINISHED");
+        assertThat(workspaceService.listContents(task.id())).isEmpty();
+        var rewritten = workspaceService.findOpenChapterStage(task.id());
+        assertThat(rewritten.stageId()).isNotEqualTo(rejectedStageId);
+        assertThat(rewritten.content().title()).isEqualTo("项目概况");
+        assertThat(rewritten.content().sequence()).isEqualTo(1);
+        assertThat(rewritten.status()).isEqualTo(ChapterStageStatus.AWAITING_REVIEW);
+        assertThat(agentRunRuntime.find(interruptedRunId).status().name()).isEqualTo("AWAITING_CONFIRM");
+        assertThat(events).allMatch(event -> interruptedRunId.equals(event.getRunId()));
         assertThat(StubAgentConfiguration.sessions).hasSize(2);
         assertThat(StubAgentConfiguration.sessions).allMatch(session ->
                 session.equals(StubAgentConfiguration.sessions.getFirst()));
         assertThat(StubAgentConfiguration.messages.getLast()).contains("请补充实施依据并调整论证顺序");
+        assertThat(StubAgentConfiguration.calls).hasValue(1);
+
+        assertThatThrownBy(() -> roundRunner.resume(task.id(), interruptedRunId,
+                List.of(new AgentRunDecision("tool-call-1", true))).collectList().block())
+                .hasMessageContaining("pending tool call");
+        roundRunner.resume(task.id(), interruptedRunId,
+                List.of(new AgentRunDecision("tool-call-rewrite", true))).collectList().block();
+        assertThat(workspaceService.listContents(task.id())).singleElement()
+                .satisfies(content -> assertThat(content.title()).isEqualTo("项目概况"));
+        assertThat(agentRunRuntime.find(interruptedRunId).status().name()).isEqualTo("FINISHED");
+        assertThat(agentRunRuntime.find(interruptedRunId).pendingInterrupts()).isEmpty();
+    }
+
+    @Test
+    void keepsTheRunAwaitingReviewWhenRevisionFeedbackIsInvalid() {
+        WritingTask task = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+        StubAgentConfiguration.interruptNextRun.set(true);
+        String interruptedRunId = roundRunner.run(task.id()).collectList().block().getFirst().getRunId();
+
+        assertThatThrownBy(() -> roundRunner.resume(task.id(), interruptedRunId,
+                List.of(new AgentRunDecision("tool-call-1", false))).collectList().block())
+                .hasMessageContaining("请填写审核意见");
+
+        assertThat(agentRunRuntime.find(interruptedRunId).status().name()).isEqualTo("AWAITING_CONFIRM");
+        assertThat(workspaceService.findOpenChapterStage(task.id()).status())
+                .isEqualTo(ChapterStageStatus.AWAITING_REVIEW);
     }
 
     @Test
@@ -763,10 +797,32 @@ class IncrementalWritingFlowTest {
                         String runId,
                         List<io.agentscope.core.agui.model.AguiResume> resume,
                         Map<String, String> resumeToolCallIds,
-                        WritingToolContext context) {
+                        WritingToolContext context,
+                        String message) {
                     return Flux.defer(() -> {
                         sessions.add(chapterSessionId);
-                        messages.add("");
+                        messages.add(message);
+                        if (resume.stream().anyMatch(decision -> !decision.isResolved())) {
+                            assertThat(context.stage()).isNull();
+                            assertThat(resume.getFirst().getPayload()).isInstanceOf(Map.class);
+                            assertThat(((Map<?, ?>) resume.getFirst().getPayload()).get("approved")).isEqualTo(false);
+                            context.markResearchLocated();
+                            writingTools.saveContent("项目概况", "根据审核意见重写", "## 项目概况\n\n补充实施依据后的正文", context);
+                            writingTools.saveChapterMemory("# 项目概况记忆\n\n补充实施依据。", context);
+                            writingTools.updateDocumentState("# 文档当前状态\n\n项目概况已重写。", context);
+                            writingTools.updateWorkingPlan("""
+                                    {"version":1,"completed":["项目概况"],"nextDirection":"实施安排",
+                                     "remainingDirections":["实施安排"],"adjustmentReason":"根据审核意见重写"}
+                                    """, context);
+                            return Flux.just(new AguiEvent.RunStarted(chapterSessionId, runId),
+                                    new AguiEvent.TextMessageContent(chapterSessionId, runId, "rewrite-" + runId, "已重写，等待审核"),
+                                    new AguiEvent.RunFinished(chapterSessionId, runId, null,
+                                            new AguiEvent.RunFinishedInterruptOutcome(List.of(
+                                                    new AguiEvent.Interrupt("interrupt-rewrite", "ASK", "等待重写审核",
+                                                            "tool-call-rewrite", Map.of(), null, Map.of(
+                                                            "toolName", "commit_chapter",
+                                                            "toolInput", Map.of("stage_id", context.stageId())))))));
+                        }
                         writingTools.commitChapter(context.stageId(), context);
                         return events(chapterSessionId, runId, "章节审核已通过");
                     });

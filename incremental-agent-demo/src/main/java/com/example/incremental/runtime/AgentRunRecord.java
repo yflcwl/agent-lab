@@ -10,6 +10,7 @@ public record AgentRunRecord(
         AgentRunStatus status,
         List<AgentRunInterrupt> pendingInterrupts,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt,
+        long lockVersion) {
 }
 

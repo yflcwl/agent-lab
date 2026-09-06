@@ -74,6 +74,9 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.example.incremental.IncrementalAgentDemoApplication</mainClass>
+                </configuration>
             </plugin>
         </plugins>
     </build>

@@ -40,7 +40,7 @@ public class RoundRunner {
             try {
                 WritingWorkflow.PreparedRun prepared = writingWorkflow.prepareRun(taskId, userMessage);
                 AgentRunContext run = agentRunRuntime.createRun(taskId, prepared.chapterSessionId());
-                AgentRunStore.RunHistory history = agentRunRuntime.beginHistory(run, prepared.task().userId(),
+                AgentRunEventRecorder.RunHistory history = agentRunRuntime.beginHistory(run, prepared.task().userId(),
                         WRITING_AGENT_ID, "写作任务 " + taskId, userMessage);
                 Flux<AguiEvent> events = prepared.recoveredCommit() == null
                         ? writingWorkflow.completeAgentEvents(taskId, prepared.toolContext(), run,
@@ -48,7 +48,7 @@ public class RoundRunner {
                                         prepared.toolContext())))
                         : writingWorkflow.recoveredEvents(prepared, run);
                 return agentRunRuntime.start(run, history, events)
-                        .onErrorResume(error -> retryCommit(prepared, run, history, error))
+                        .onErrorResume(error -> retryCommit(prepared, run, error))
                         .doOnTerminate(() -> finish(taskId, "finished"))
                         .doOnCancel(() -> finish(taskId, "cancelled"));
             } catch (RuntimeException error) {
@@ -64,7 +64,7 @@ public class RoundRunner {
             acquire(taskId);
             try {
                 AgentRunRuntime.ResumeRequest resume = agentRunRuntime.prepareResume(taskId, interruptedRunId, decisions);
-                AgentRunStore.RunHistory history = agentRunRuntime.findHistory(interruptedRunId);
+                AgentRunEventRecorder.RunHistory history = agentRunRuntime.findHistory(interruptedRunId);
                 WritingWorkflow.AgentResumeInput input;
                 try {
                     input = writingWorkflow.prepareAgentResume(taskId, resume.interrupts(), decisions);
@@ -93,7 +93,6 @@ public class RoundRunner {
     private Flux<AguiEvent> retryCommit(
             WritingWorkflow.PreparedRun failed,
             AgentRunContext failedRun,
-            AgentRunStore.RunHistory history,
             Throwable error) {
         WritingWorkflow.PreparedRun retry = writingWorkflow.prepareRetry(
                 failed.task().id(), failedRun.threadId());
@@ -102,7 +101,7 @@ public class RoundRunner {
                     "本轮执行失败：" + messageOf(error), "RUN_FAILED");
         }
         AgentRunContext retryRun = agentRunRuntime.createRun(failed.task().id(), retry.chapterSessionId());
-        AgentRunStore.RunHistory retryHistory = agentRunRuntime.beginRetryHistory(history, retryRun, WRITING_AGENT_ID);
+        AgentRunEventRecorder.RunHistory retryHistory = agentRunRuntime.beginRetryHistory(failedRun.runId(), retryRun, WRITING_AGENT_ID);
         Flux<AguiEvent> retryEvents = writingWorkflow.completeAgentEvents(failed.task().id(), retry.toolContext(), retryRun,
                 Flux.defer(() -> agentExecutor.execute(retryRun, retry.task(), retry.command(), retry.toolContext())));
         return Flux.concat(Flux.just(agentRunRuntime.retryEvent(retryRun, failedRun.runId(), error)),

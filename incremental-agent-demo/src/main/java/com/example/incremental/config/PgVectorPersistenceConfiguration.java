@@ -9,6 +9,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.util.StringUtils;
 
@@ -34,6 +35,7 @@ public class PgVectorPersistenceConfiguration {
     }
 
     @Bean
+    @Order(0)
     ApplicationRunner initializePgVectorSchema(
             DataSource pgVectorDataSource,
             TaskRagChunkMapper ragChunkMapper,
@@ -41,6 +43,8 @@ public class PgVectorPersistenceConfiguration {
             DemoProperties properties) {
         return args -> {
             new ResourceDatabasePopulator(new ClassPathResource("db/migration/V1__agent_history.sql"))
+                    .execute(pgVectorDataSource);
+            new ResourceDatabasePopulator(new ClassPathResource("db/migration/V2__authoritative_agent_run.sql"))
                     .execute(pgVectorDataSource);
             if (!agentHistorySchemaMapper.hasMessageRunForeignKey()) {
                 agentHistorySchemaMapper.addMessageRunForeignKey();

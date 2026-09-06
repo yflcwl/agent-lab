@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class AgentScopeWritingAgentTest {
 
@@ -53,6 +54,37 @@ class AgentScopeWritingAgentTest {
             assertThat(result.isConfirmed()).isTrue();
             assertThat(result.getToolCall()).isSameAs(toolCall);
         });
+    }
+
+    @Test
+    void convertsRejectionWithoutApprovingThePendingTool() {
+        ToolUseBlock toolCall = new ToolUseBlock("call-1", "commit_chapter", Map.of("stage_id", "stage-1"))
+                .withState(ToolCallState.ASKING);
+        var results = AgentScopeWritingAgent.toConfirmResults(
+                List.of(new AguiResume("interrupt-1", AguiResume.STATUS_CANCELLED,
+                        Map.of("approved", false, "feedback", "请补充依据"))),
+                Map.of("interrupt-1", "call-1"), Map.of("call-1", toolCall));
+
+        assertThat(results).singleElement().satisfies(result -> {
+            assertThat(result.isConfirmed()).isFalse();
+            assertThat(result.getToolCall()).isSameAs(toolCall);
+        });
+        assertThat(toolCall.getState()).isEqualTo(ToolCallState.ASKING);
+    }
+
+    @Test
+    void refusesPartialOrDuplicateConfirmationsThatWouldLeaveAnAskUnconsumed() {
+        var first = new ToolUseBlock("call-1", "commit_chapter", Map.of()).withState(ToolCallState.ASKING);
+        var second = new ToolUseBlock("call-2", "another_tool", Map.of()).withState(ToolCallState.ASKING);
+        var decision = new AguiResume("interrupt-1", AguiResume.STATUS_RESOLVED, Map.of("approved", true));
+        var mapping = Map.of("interrupt-1", "call-1", "interrupt-2", "call-2");
+
+        assertThatThrownBy(() -> AgentScopeWritingAgent.toConfirmResults(
+                List.of(decision), mapping, Map.of("call-1", first, "call-2", second)))
+                .hasMessageContaining("全部 ASK");
+        assertThatThrownBy(() -> AgentScopeWritingAgent.toConfirmResults(
+                List.of(decision, decision), mapping, Map.of("call-1", first)))
+                .hasMessageContaining("不能重复确认");
     }
 
     @Test

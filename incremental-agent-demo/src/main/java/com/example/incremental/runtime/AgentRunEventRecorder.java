@@ -1,6 +1,5 @@
 package com.example.incremental.runtime;
 
-import com.example.incremental.config.DemoProperties;
 import com.example.incremental.persistence.agent.AgentConversationHistory;
 import com.example.incremental.persistence.agent.AgentHistoryService;
 import com.example.incremental.persistence.agent.AgentMessage;
@@ -11,102 +10,23 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agui.event.AguiEvent;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.stereotype.Repository;
-import org.springframework.util.StringUtils;
+import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
-import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.time.Instant;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-@Repository
-public class AgentRunStore {
+@Service
+public class AgentRunEventRecorder {
 
     private final ObjectMapper objectMapper;
     private final ObjectProvider<AgentHistoryService> agentHistoryServiceProvider;
-    private final Path runDirectory;
 
-    public AgentRunStore(
-            ObjectMapper objectMapper,
-            ObjectProvider<AgentHistoryService> agentHistoryServiceProvider,
-            DemoProperties properties) {
+    public AgentRunEventRecorder(ObjectMapper objectMapper, ObjectProvider<AgentHistoryService> historyProvider) {
         this.objectMapper = objectMapper;
-        this.agentHistoryServiceProvider = agentHistoryServiceProvider;
-        this.runDirectory = properties.getStateRoot().toAbsolutePath().normalize().resolve("runs");
-    }
-
-    public synchronized void create(AgentRunRecord record) {
-        save(record);
-    }
-
-    public synchronized AgentRunRecord find(String runId) {
-        Path file = file(runId);
-        try {
-            if (!Files.isRegularFile(file)) {
-                throw new IllegalArgumentException("Agent Run 不存在: " + runId);
-            }
-            return objectMapper.readValue(file.toFile(), AgentRunRecord.class);
-        } catch (IOException e) {
-            throw new IllegalStateException("读取 Agent Run 失败", e);
-        }
-    }
-
-    public synchronized AgentRunRecord findAwaitingConfirmation(String correlationId) {
-        if (!Files.isDirectory(runDirectory)) {
-            return null;
-        }
-        try (var files = Files.list(runDirectory)) {
-            return files.filter(path -> path.getFileName().toString().endsWith(".json"))
-                    .map(this::read)
-                    .filter(record -> correlationId.equals(record.correlationId()))
-                    .filter(record -> record.status() == AgentRunStatus.AWAITING_CONFIRM
-                            || record.status() == AgentRunStatus.RESUMING)
-                    .filter(record -> !record.pendingInterrupts().isEmpty())
-                    .max(Comparator.comparing(AgentRunRecord::updatedAt))
-                    .orElse(null);
-        } catch (IOException e) {
-            throw new IllegalStateException("读取待确认 Agent Run 失败", e);
-        }
-    }
-
-    public synchronized void update(String runId, AgentRunStatus status, List<AgentRunInterrupt> interrupts) {
-        AgentRunRecord current = find(runId);
-        save(new AgentRunRecord(current.runId(), current.correlationId(), current.threadId(), status,
-                List.copyOf(interrupts), current.createdAt(), Instant.now()));
-    }
-
-    public RunHistory beginHistory(
-            AgentRunContext run,
-            String userId,
-            String agentId,
-            String title,
-            String userMessage) {
-        AgentHistoryService historyService = agentHistoryServiceProvider.getIfAvailable();
-        if (historyService == null) {
-            return null;
-        }
-        historyService.getOrCreateConversation(run.correlationId(), null, userId, agentId, title);
-        String content = StringUtils.hasText(userMessage) ? userMessage : "继续";
-        var message = historyService.saveMessage(run.correlationId(), null, AgentMessageRole.USER, content, null,
-                AgentMessageStatus.COMPLETED);
-        historyService.createRun(run.runId(), run.correlationId(), agentId, message.id());
-        return new RunHistory(historyService, run.correlationId(), message.id(), run.runId());
-    }
-
-    public RunHistory beginRetryHistory(RunHistory history, AgentRunContext run, String agentId) {
-        if (history == null) {
-            return null;
-        }
-        history.historyService().createRun(run.runId(), history.conversationId(), agentId, history.triggerMessageId());
-        return new RunHistory(history.historyService(), history.conversationId(), history.triggerMessageId(), run.runId());
+        this.agentHistoryServiceProvider = historyProvider;
     }
 
     public RunHistory findHistory(String runId) {
@@ -147,8 +67,6 @@ public class AgentRunStore {
                 return;
             }
             if (event instanceof AguiEvent.RunStarted) {
-                history.historyService().updateRunStatus(event.getRunId(),
-                        com.example.incremental.persistence.agent.AgentRunStatus.RUNNING, null, null);
                 history.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_STARTED,
                         eventPayload(event), null, null, null);
                 return;
@@ -168,12 +86,10 @@ public class AgentRunStore {
                 history.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_FAILED,
                         eventPayload(event, "errorCode", error.code(), "errorMessage", error.message()),
                         null, null, null);
-                history.historyService().updateRunStatus(event.getRunId(),
-                        com.example.incremental.persistence.agent.AgentRunStatus.FAILED, error.code(), error.message());
                 finalized.set(true);
                 return;
             }
-            if (event instanceof AguiEvent.RunFinished finished) {
+            if (event instanceof AguiEvent.RunFinished finished && !finalized.get()) {
                 persistReasoningSummary(history, event.getRunId(), reasoning);
                 if (finished.outcome() instanceof AguiEvent.RunFinishedInterruptOutcome outcome) {
                     outcome.interrupts().forEach(interrupt -> history.historyService().saveRunEvent(
@@ -184,14 +100,10 @@ public class AgentRunStore {
                     history.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_FINISHED,
                             eventPayload(event, "outcome", "WAITING"), null, null, null);
                     persistAssistantMessage(history, event.getRunId(), assistantContent, AgentMessageStatus.COMPLETED);
-                    history.historyService().updateRunStatus(event.getRunId(),
-                            com.example.incremental.persistence.agent.AgentRunStatus.WAITING, null, null);
                 } else {
                     history.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_FINISHED,
                             eventPayload(event, "outcome", "COMPLETED"), null, null, null);
                     persistAssistantMessage(history, event.getRunId(), assistantContent, AgentMessageStatus.COMPLETED);
-                    history.historyService().updateRunStatus(event.getRunId(),
-                            com.example.incremental.persistence.agent.AgentRunStatus.COMPLETED, null, null);
                 }
                 finalized.set(true);
             }
@@ -200,9 +112,6 @@ public class AgentRunStore {
                 persistAssistantMessage(history, history.runId(), assistantContent, AgentMessageStatus.FAILED);
                 history.historyService().saveRunEvent(history.runId(), AgentRunEventType.RUN_FAILED,
                         eventPayload(null, "errorMessage", safeMessage(error)), null, null, null);
-                history.historyService().updateRunStatus(history.runId(),
-                        com.example.incremental.persistence.agent.AgentRunStatus.FAILED,
-                        "RUN_FAILED", safeMessage(error));
             }
         });
     }
@@ -239,45 +148,6 @@ public class AgentRunStore {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("序列化 Agent Run 事件失败", e);
         }
-    }
-
-    private AgentRunRecord read(Path file) {
-        try {
-            return objectMapper.readValue(file.toFile(), AgentRunRecord.class);
-        } catch (IOException e) {
-            throw new IllegalStateException("读取 Agent Run 失败", e);
-        }
-    }
-
-    private synchronized void save(AgentRunRecord record) {
-        try {
-            Files.createDirectories(runDirectory);
-            Path target = file(record.runId());
-            Path temporary = Files.createTempFile(runDirectory, "." + record.runId(), ".tmp");
-            try {
-                objectMapper.writerWithDefaultPrettyPrinter().writeValue(temporary.toFile(), record);
-                try {
-                    Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                } catch (AtomicMoveNotSupportedException e) {
-                    Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
-                }
-            } finally {
-                Files.deleteIfExists(temporary);
-            }
-        } catch (IOException e) {
-            throw new IllegalStateException("保存 Agent Run 失败", e);
-        }
-    }
-
-    private Path file(String runId) {
-        if (runId == null || !runId.matches("(?:run|writing)-[0-9a-fA-F-]+")) {
-            throw new IllegalArgumentException("runId 不合法");
-        }
-        Path result = runDirectory.resolve(runId + ".json").normalize();
-        if (!result.startsWith(runDirectory)) {
-            throw new IllegalArgumentException("runId 不合法");
-        }
-        return result;
     }
 
     private String safeMessage(Throwable error) {

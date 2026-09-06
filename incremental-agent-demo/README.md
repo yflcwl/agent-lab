@@ -86,7 +86,9 @@ Content-Type: application/json
 {"decisions":[{"toolCallId":"...","approved":true}]}
 ```
 
-恢复请求不携带用户消息；Runtime 使用保存的 thread、pending tool call 与 AG-UI resume 从原暂停点继续。当前仅开放通过审核；拒绝审核需先实现业务 review feedback 的保存和读取，再以 `approved=false` 恢复。
+Runtime 使用保存的 thread、pending tool call 从原 ASK 暂停点继续。批准和拒绝都经过 AgentExecutor 转换为 ConfirmResult 回传 AgentScope；批准由原工具提交，拒绝由 Workflow 废弃旧 Stage，并将审核 feedback 注入同一 chapter session 后继续重写。
+
+PostgreSQL 模式下，Run 状态以 `agent_run` 为唯一来源，不再读写平台的 `state/runs/*.json`；AgentScope 自身的 `agent_state.json` 继续保留。已有部署升级前请按[Run 状态存储切换说明](docs/run-storage-migration.md)预览、导入旧 Run。
 
 前端直接消费 AG-UI 事件，并把文本、推理、工具调用与工具结果整理为可折叠的“模型工作过程”。资料子 Agent 默认以 `CUSTOM subagent.*` 事件出现，避免污染父 Run 的文本与生命周期。
 

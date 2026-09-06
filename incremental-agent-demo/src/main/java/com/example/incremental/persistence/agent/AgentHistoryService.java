@@ -72,7 +72,7 @@ public class AgentHistoryService {
     @Transactional(readOnly = true)
     public AgentRun findRun(String runId) {
         requireText(runId, "runId", 128);
-        return runMapper.findById(runId);
+        return runMapper.selectById(runId);
     }
 
     @Transactional
@@ -94,7 +94,7 @@ public class AgentHistoryService {
             throw new IllegalArgumentException("Conversation 不存在: " + conversationId);
         }
         if (runId != null) {
-            AgentRun run = runMapper.findById(runId);
+            AgentRun run = runMapper.selectById(runId);
             if (run == null || !conversationId.equals(run.conversationId())) {
                 throw new IllegalArgumentException("Run 不属于当前 Conversation");
             }
@@ -106,48 +106,6 @@ public class AgentHistoryService {
         messageMapper.insert(message);
         conversationMapper.touch(conversationId, now);
         return message;
-    }
-
-    @Transactional
-    public AgentRun createRun(String conversationId, String agentId, String triggerMessageId) {
-        return createRun(UUID.randomUUID().toString(), conversationId, agentId, triggerMessageId);
-    }
-
-    @Transactional
-    public AgentRun createRun(String runId, String conversationId, String agentId, String triggerMessageId) {
-        requireText(runId, "runId", 128);
-        requireText(conversationId, "conversationId", 64);
-        requireText(agentId, "agentId", 64);
-        requireText(triggerMessageId, "triggerMessageId", 64);
-        AgentConversation conversation = conversationMapper.lockById(conversationId);
-        AgentMessage triggerMessage = messageMapper.findById(triggerMessageId);
-        if (conversation == null || triggerMessage == null
-                || !conversationId.equals(triggerMessage.conversationId())
-                || triggerMessage.role() != AgentMessageRole.USER) {
-            throw new IllegalArgumentException("triggerMessage 必须是当前 Conversation 的用户消息");
-        }
-        Instant now = Instant.now();
-        AgentRun run = new AgentRun(runId, conversationId, agentId, triggerMessageId,
-                AgentRunStatus.CREATED, null, null, null, null, now, now);
-        runMapper.insert(run);
-        return run;
-    }
-
-    @Transactional
-    public AgentRun updateRunStatus(String runId, AgentRunStatus status, String errorCode, String errorMessage) {
-        requireText(runId, "runId", 128);
-        if (status == null) {
-            throw new IllegalArgumentException("status 不能为空");
-        }
-        AgentRun current = runMapper.lockById(runId);
-        if (current == null) {
-            throw new IllegalArgumentException("Run 不存在: " + runId);
-        }
-        Instant now = Instant.now();
-        Instant startedAt = status == AgentRunStatus.RUNNING && current.startedAt() == null ? now : null;
-        Instant finishedAt = isTerminal(status) ? now : null;
-        runMapper.updateStatus(runId, status, errorCode, errorMessage, startedAt, finishedAt, now);
-        return runMapper.findById(runId);
     }
 
     @Transactional
@@ -224,9 +182,4 @@ public class AgentHistoryService {
         }
     }
 
-    private boolean isTerminal(AgentRunStatus status) {
-        return status == AgentRunStatus.COMPLETED
-                || status == AgentRunStatus.FAILED
-                || status == AgentRunStatus.CANCELLED;
-    }
 }
