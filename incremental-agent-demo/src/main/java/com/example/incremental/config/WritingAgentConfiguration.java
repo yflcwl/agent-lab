@@ -1,6 +1,7 @@
 package com.example.incremental.config;
 
 import com.example.incremental.agent.AgentScopeWritingAgent;
+import com.example.incremental.agent.AgentScopeResumeMiddleware;
 import com.example.incremental.agent.ResearchTools;
 import com.example.incremental.agent.WritingTools;
 import com.example.incremental.writing.WritingAgent;
@@ -66,6 +67,8 @@ public class WritingAgentConfiguration {
                 .toolkit(toolkit)
                 .permissionContext(writingPermissionContext)
                 .enablePendingToolRecovery(true)
+                .stopOnReject(false)
+                .middleware(new AgentScopeResumeMiddleware())
                 .maxIters(15)
                 .disableFilesystemTools()
                 .disableMemoryHooks()
@@ -92,4 +95,3 @@ public class WritingAgentConfiguration {
         return prompt.trim();
     }
 }
-

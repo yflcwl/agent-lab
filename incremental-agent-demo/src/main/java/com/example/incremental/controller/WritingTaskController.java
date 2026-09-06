@@ -11,9 +11,8 @@ import com.example.incremental.runtime.RoundRunner;
 import com.example.incremental.runtime.AgentRunDecision;
 import com.example.incremental.workspace.TaskWorkspaceService;
 import com.example.incremental.rag.TempRagService;
-import com.example.incremental.persistence.agent.AgentHistoryService;
+import com.example.incremental.persistence.agent.AgentConversationHistory;
 import com.example.incremental.persistence.agent.AgentMessage;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -49,21 +48,18 @@ public class WritingTaskController {
     private final AgentRunRuntime agentRunRuntime;
     private final DocumentTextExtractor documentTextExtractor;
     private final TempRagService tempRagService;
-    private final ObjectProvider<AgentHistoryService> agentHistoryServiceProvider;
 
     public WritingTaskController(
             TaskWorkspaceService workspaceService,
             RoundRunner roundRunner,
             AgentRunRuntime agentRunRuntime,
             DocumentTextExtractor documentTextExtractor,
-            TempRagService tempRagService,
-            ObjectProvider<AgentHistoryService> agentHistoryServiceProvider) {
+            TempRagService tempRagService) {
         this.workspaceService = workspaceService;
         this.roundRunner = roundRunner;
         this.agentRunRuntime = agentRunRuntime;
         this.documentTextExtractor = documentTextExtractor;
         this.tempRagService = tempRagService;
-        this.agentHistoryServiceProvider = agentHistoryServiceProvider;
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -175,8 +171,12 @@ public class WritingTaskController {
 
     @GetMapping("/{taskId}/messages")
     public List<AgentMessage> getMessages(@PathVariable String taskId) {
-        AgentHistoryService historyService = agentHistoryServiceProvider.getIfAvailable();
-        return historyService == null ? List.of() : historyService.findMessages(taskId, 0, 200);
+        return agentRunRuntime.findMessages(taskId, 0, 200);
+    }
+
+    @GetMapping("/{taskId}/history")
+    public AgentConversationHistory getHistory(@PathVariable String taskId) {
+        return agentRunRuntime.findConversationHistory(taskId);
     }
 
     @GetMapping("/{taskId}/pending-review")

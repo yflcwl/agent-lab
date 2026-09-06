@@ -183,6 +183,15 @@ public class AgentHistoryService {
     }
 
     @Transactional(readOnly = true)
+    public AgentConversationHistory findHistory(String conversationId) {
+        requireText(conversationId, "conversationId", 64);
+        return new AgentConversationHistory(
+                messageMapper.findByConversationId(conversationId, 0, MAX_PAGE_SIZE),
+                runMapper.findByConversationId(conversationId),
+                runEventMapper.findByConversationId(conversationId));
+    }
+
+    @Transactional(readOnly = true)
     public List<AgentConversation> findConversations(String tenantId, String userId, long offset, int limit) {
         if (tenantId != null) {
             requireText(tenantId, "tenantId", 64);

@@ -23,6 +23,7 @@ public interface WritingAgent {
             String runId,
             List<AguiResume> resume,
             Map<String, String> resumeToolCallIds,
-            WritingToolContext toolContext);
+            WritingToolContext toolContext,
+            String message);
 }
 

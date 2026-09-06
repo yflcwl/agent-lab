@@ -6,6 +6,8 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
+import java.util.List;
+
 @Mapper
 public interface AgentRunEventMapper {
 
@@ -20,4 +22,11 @@ public interface AgentRunEventMapper {
 
     @Select("SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM agent_run_event WHERE run_id = #{runId}")
     long nextSequenceNo(@Param("runId") String runId);
+
+    @Select("""
+            SELECT * FROM agent_run_event
+            WHERE conversation_id = #{conversationId}
+            ORDER BY created_at ASC, sequence_no ASC
+            """)
+    List<AgentRunEvent> findByConversationId(@Param("conversationId") String conversationId);
 }

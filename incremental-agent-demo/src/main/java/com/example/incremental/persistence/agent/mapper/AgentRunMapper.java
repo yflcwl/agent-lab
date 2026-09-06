@@ -9,6 +9,7 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import java.time.Instant;
+import java.util.List;
 
 @Mapper
 public interface AgentRunMapper {
@@ -27,6 +28,9 @@ public interface AgentRunMapper {
 
     @Select("SELECT * FROM agent_run WHERE id = #{id} FOR UPDATE")
     AgentRun lockById(@Param("id") String id);
+
+    @Select("SELECT * FROM agent_run WHERE conversation_id = #{conversationId} ORDER BY created_at ASC")
+    List<AgentRun> findByConversationId(@Param("conversationId") String conversationId);
 
     @Update("""
             UPDATE agent_run

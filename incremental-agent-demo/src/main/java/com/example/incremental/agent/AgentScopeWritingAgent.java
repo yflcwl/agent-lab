@@ -27,6 +27,7 @@ import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.ToolCallState;
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.permission.PermissionContextState;
@@ -103,14 +104,14 @@ public class AgentScopeWritingAgent implements WritingAgent {
             WritingRunCommand command,
             WritingToolContext toolContext) {
         replacePermissionContext(task, chapterSessionId);
-        clearLegacyUnexpectedAskingCalls(task, chapterSessionId);
-        ToolUseBlock pendingCommit = pendingChapterCommit(task, chapterSessionId);
-        if (pendingCommit != null) {
+        List<ToolUseBlock> pending = List.copyOf(pendingAskingToolCalls(task, chapterSessionId).values());
+        if (!pending.isEmpty()) {
             return Flux.just(
                     new AguiEvent.RunStarted(chapterSessionId, runId),
                     new AguiEvent.RunFinished(chapterSessionId, runId, null,
-                            new AguiEvent.RunFinishedInterruptOutcome(List.of(
-                                    RequireUserConfirmAguiEventConverter.toInterrupt(null, pendingCommit)))));
+                            new AguiEvent.RunFinishedInterruptOutcome(pending.stream()
+                                    .map(tool -> RequireUserConfirmAguiEventConverter.toInterrupt(null, tool))
+                                    .toList())));
         }
         RuntimeContext runtimeContext = RuntimeContext.builder()
                 .userId(task.userId())
@@ -160,7 +161,8 @@ public class AgentScopeWritingAgent implements WritingAgent {
             String runId,
             List<AguiResume> resume,
             Map<String, String> resumeToolCallIds,
-            WritingToolContext toolContext) {
+            WritingToolContext toolContext,
+            String message) {
         replacePermissionContext(task, chapterSessionId);
         RuntimeContext runtimeContext = RuntimeContext.builder()
                 .userId(task.userId())
@@ -173,10 +175,15 @@ public class AgentScopeWritingAgent implements WritingAgent {
                 .resume(resume)
                 .build();
         UserMessage confirmation = UserMessage.builder()
+                .textContent(message)
                 .metadata(Map.of(Msg.METADATA_CONFIRM_RESULTS,
                         toConfirmResults(resume, resumeToolCallIds,
                                 pendingAskingToolCalls(task, chapterSessionId))))
                 .build();
+        if (message != null && !message.isBlank()) {
+            runtimeContext.put(AgentScopeResumeMiddleware.Feedback.class,
+                    new AgentScopeResumeMiddleware.Feedback(new UserMessage(message)));
+        }
         AguiStreamContext streamContext = new AguiStreamContext(
                 chapterSessionId, runId, adapterConfig, input);
         return agent.streamEvents(confirmation, runtimeContext)
@@ -250,6 +257,12 @@ public class AgentScopeWritingAgent implements WritingAgent {
             List<AguiResume> resume,
             Map<String, String> resumeToolCallIds,
             Map<String, ToolUseBlock> pendingToolCalls) {
+        var confirmedIds = resume.stream().map(decision -> resumeToolCallIds.get(decision.getInterruptId()))
+                .collect(java.util.stream.Collectors.toSet());
+        if (resume.isEmpty() || confirmedIds.size() != resume.size()
+                || !confirmedIds.equals(pendingToolCalls.keySet())) {
+            throw new IllegalArgumentException("resume 必须消费当前 Session 的全部 ASK tool call，且不能重复确认");
+        }
         return resume.stream().map(decision -> {
             String toolCallId = resumeToolCallIds.get(decision.getInterruptId());
             ToolUseBlock toolCall = pendingToolCalls.get(toolCallId);
@@ -270,34 +283,17 @@ public class AgentScopeWritingAgent implements WritingAgent {
         agent.getDelegate().replacePermissionContext(task.userId(), chapterSessionId, permissionContext);
     }
 
-    private void clearLegacyUnexpectedAskingCalls(WritingTask task, String chapterSessionId) {
-        boolean hasUnexpectedAskingCall = agent.getDelegate().getAgentState(task.userId(), chapterSessionId)
-                .getContext().stream()
-                .flatMap(message -> message.getContent().stream())
-                .filter(ToolUseBlock.class::isInstance)
-                .map(ToolUseBlock.class::cast)
-                .anyMatch(toolCall -> toolCall.getState() == ToolCallState.ASKING
-                        && !"commit_chapter".equals(toolCall.getName()));
-        if (hasUnexpectedAskingCall) {
-            agent.clearContext(task.userId(), chapterSessionId);
-        }
-    }
-
-    private ToolUseBlock pendingChapterCommit(WritingTask task, String chapterSessionId) {
-        return pendingAskingToolCalls(task, chapterSessionId).values().stream()
-                .filter(toolCall -> "commit_chapter".equals(toolCall.getName()))
-                .reduce((first, latest) -> latest)
-                .orElse(null);
-    }
-
     private Map<String, ToolUseBlock> pendingAskingToolCalls(WritingTask task, String chapterSessionId) {
         Map<String, ToolUseBlock> pending = new LinkedHashMap<>();
-        agent.getDelegate().getAgentState(task.userId(), chapterSessionId)
-                .getContext().stream()
+        List<Msg> context = agent.getDelegate().getAgentState(task.userId(), chapterSessionId).getContext();
+        var resolvedIds = context.stream().flatMap(msg -> msg.getContentBlocks(ToolResultBlock.class).stream())
+                .map(ToolResultBlock::getId).collect(java.util.stream.Collectors.toSet());
+        context.stream()
                 .flatMap(message -> message.getContent().stream())
                 .filter(ToolUseBlock.class::isInstance)
                 .map(ToolUseBlock.class::cast)
                 .filter(toolCall -> toolCall.getState() == ToolCallState.ASKING)
+                .filter(toolCall -> !resolvedIds.contains(toolCall.getId()))
                 .forEach(toolCall -> pending.put(toolCall.getId(), toolCall));
         return Map.copyOf(pending);
     }
