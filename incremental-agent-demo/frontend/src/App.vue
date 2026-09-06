@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import {computed, nextTick, onMounted, reactive, ref} from "vue";
+import {computed, nextTick, onBeforeUnmount, onMounted, reactive, ref} from "vue";
 import type {ComponentPublicInstance} from "vue";
-import {consumeSse, createTask, getContent, getPendingReview, getTask, listTasks} from "./api";
+import {consumeSse, createTask, getContent, getHistory, getPendingReview, getTask, listTasks} from "./api";
 import {renderMarkdown} from "./markdown";
 import type {
     AguiEvent,
@@ -46,10 +46,17 @@ const userId = ref("demo-user");
 const taskRequirement = ref("");
 const referenceFile = ref<File | null>(null);
 const sourceFiles = ref<File[]>([]);
+const leftCollapsed = ref(false);
+const rightCollapsed = ref(false);
+const leftWidth = ref(288);
+const rightWidth = ref(390);
+let resizeCleanup: (() => void) | null = null;
 const conversations = reactive<Record<string, ConversationItem[]>>({});
 const conversationScroll = ref<HTMLElement | null>(null);
 const targetElements = new Map<string, HTMLElement>();
 const activeIndex = ref(0);
+const hoveredIndex = ref<number | null>(null);
+const hoveredTop = ref(0);
 let abortController: AbortController | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let followsOutput = true;
@@ -58,6 +65,24 @@ let forceScroll = false;
 
 const currentConversation = computed(() => taskId.value ? conversations[taskId.value] || [] : []);
 const userMessages = computed(() => currentConversation.value.filter(item => item.kind === "user"));
+const hoveredMessage = computed(() => hoveredIndex.value == null ? null : userMessages.value[hoveredIndex.value] || null);
+const hoveredReply = computed(() => {
+    const message = hoveredMessage.value;
+    if (!message) return "";
+    const start = currentConversation.value.findIndex(item => item.id === message.id);
+    const reply = currentConversation.value.slice(start + 1).find(item => item.kind !== "user");
+    if (!reply) return "";
+    if (reply.kind === "notice") return reply.text;
+    if (reply.kind === "stream") return modelOutput(reply);
+    if (reply.kind === "review") return reply.status;
+    return "";
+});
+const indexPreviewStyle = computed(() => ({top: `${Math.max(0, hoveredTop.value - 10)}px`}));
+
+function showIndexPreview(index: number, event: MouseEvent): void {
+    hoveredIndex.value = index;
+    hoveredTop.value = (event.currentTarget as HTMLElement).offsetTop;
+}
 const contentCount = computed(() => taskView.value?.contents.length || 0);
 const runnable = computed(() => Boolean(taskView.value?.sources.length));
 const viewingBackgroundTask = computed(() => running.value && taskId.value !== runningTaskId.value);
@@ -85,6 +110,32 @@ const composerHint = computed(() => {
         ? "首轮将形成临时章节计划，并且只暂存第一章候选内容"
         : "每次发送消息只推进一章；候选章节需审核后才会进入成果区";
 });
+const shellStyle = computed(() => ({
+    "--left-width": `${leftCollapsed.value ? 58 : leftWidth.value}px`,
+    "--right-width": `${rightCollapsed.value ? 58 : rightWidth.value}px`
+}));
+
+function startResize(side: "left" | "right", event: PointerEvent): void {
+    if ((side === "left" && leftCollapsed.value) || (side === "right" && rightCollapsed.value)) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const initial = side === "left" ? leftWidth.value : rightWidth.value;
+    const move = (moveEvent: PointerEvent) => {
+        const delta = moveEvent.clientX - startX;
+        if (side === "left") leftWidth.value = Math.min(420, Math.max(220, initial + delta));
+        else rightWidth.value = Math.min(560, Math.max(300, initial - delta));
+    };
+    const stop = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+        resizeCleanup = null;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    resizeCleanup = stop;
+}
+
+onBeforeUnmount(() => resizeCleanup?.());
 
 function newId(): string {
     return crypto.randomUUID();
@@ -249,6 +300,47 @@ async function refreshPendingReview(id: string): Promise<void> {
     }
 }
 
+function restoreHistory(id: string, history: Awaited<ReturnType<typeof getHistory>>): void {
+    const restored: ConversationItem[] = [];
+    const streams = new Map<string, StreamMessage>();
+    const eventEntries = new Map<string, ProcessEntry[]>();
+    for (const event of history.events) {
+        const entries = eventEntries.get(event.runId) || [];
+        let payload: Record<string, unknown> = {};
+        try { payload = JSON.parse(event.payload) as Record<string, unknown>; } catch { /* preserve event without details */ }
+        const content = typeof payload.content === "string" ? payload.content
+            : typeof payload.result === "string" ? payload.result
+                : typeof payload.output === "string" ? payload.output
+                    : typeof payload.errorMessage === "string" ? payload.errorMessage
+                        : event.eventType === "REQUIRE_CONFIRM" ? "等待用户确认" : "";
+        const toolName = typeof payload.toolName === "string" ? payload.toolName : "";
+        const label = event.eventType === "TOOL_CALL" ? "调用工具" + (toolName ? " · " + toolName : "")
+            : event.eventType === "TOOL_RESULT" ? "工具结果" + (toolName ? " · " + toolName : "") : event.eventType;
+        const kind = event.eventType === "TOOL_CALL" ? "tool-call"
+            : event.eventType === "TOOL_RESULT" ? "tool-result"
+                : event.eventType === "RUN_FAILED" ? "error" : "status";
+        entries.push({id: newId(), sequence: event.sequenceNo, timestamp: Date.parse(event.createdAt),
+            label, meta: formatTime(event.createdAt), kind, content, open: false, running: false});
+        eventEntries.set(event.runId, entries);
+    }
+    for (const message of [...history.messages].sort((a, b) => a.sequenceNo - b.sequenceNo)) {
+        if (message.role === "USER") {
+            restored.push({id: message.id, kind: "user", text: message.content, meta: formatTime(message.createdAt)});
+        } else if (message.runId && !streams.has(message.runId)) {
+            const stream = reactive(createStreamMessage()) as StreamMessage;
+            stream.streaming = false;
+            stream.process = eventEntries.get(message.runId) || [];
+            if (message.content) {
+                stream.process.push({id: newId(), sequence: Number.MAX_SAFE_INTEGER, timestamp: Date.parse(message.createdAt),
+                    label: "模型输出", meta: formatTime(message.createdAt), kind: "final-output", content: message.content, open: true});
+            }
+            streams.set(message.runId, stream);
+            restored.push(stream);
+        }
+    }
+    conversations[id] = restored;
+}
+
 async function activateTask(nextTask: WritingTaskView, addWelcome: boolean): Promise<void> {
     taskId.value = nextTask.task.id;
     taskView.value = nextTask;
@@ -263,6 +355,8 @@ async function activateTask(nextTask: WritingTaskView, addWelcome: boolean): Pro
             ? "已切换到这项历史任务。你可以发送建议，或发送“继续”来生成下一章。"
             : "这项历史任务没有背景资料，只能查看，不能继续运行。", "Session selected");
     }
+    const history = await getHistory(nextTask.task.id);
+    restoreHistory(nextTask.task.id, history);
     await Promise.all([refreshArtifact(nextTask.task.id), refreshPendingReview(nextTask.task.id)]);
     scrollToLatest(true);
 }
@@ -428,6 +522,17 @@ function finishTimeline(message: StreamMessage): void {
     message.process.forEach(entry => {
         entry.open = entry.kind === "final-output";
     });
+}
+
+function executionEntries(message: StreamMessage): ProcessEntry[] {
+    return message.process.filter(entry => entry.kind !== "model-text" && entry.kind !== "final-output");
+}
+
+function modelOutput(message: StreamMessage): string {
+    return message.process
+        .filter(entry => entry.kind === "model-text" || entry.kind === "final-output")
+        .map(entry => entry.content || "")
+        .join("");
 }
 
 function toolCallId(event: AguiEvent): string {
@@ -812,8 +917,9 @@ onMounted(async () => {
 <template>
     <div class="ambient ambient-one"></div>
     <div class="ambient ambient-two"></div>
-    <div class="app-shell">
-        <aside class="setup-rail">
+    <div class="app-shell" :style="shellStyle">
+        <aside :class="['setup-rail', {collapsed: leftCollapsed}]">
+            <button class="panel-toggle left-toggle" type="button" :aria-label="leftCollapsed ? '展开任务栏' : '折叠任务栏'" @click="leftCollapsed = !leftCollapsed"><span>{{ leftCollapsed ? '›' : '‹' }}</span><b v-if="!leftCollapsed">任务</b></button>
             <div class="brand">
                 <div class="brand-mark" aria-hidden="true">
                     <svg viewBox="0 0 32 32"><path d="M8 7.5 16 3l8 4.5v9L16 21l-8-4.5z"></path><path d="m8 16.5 8 4.5 8-4.5V25l-8 4-8-4z"></path></svg>
@@ -868,12 +974,17 @@ onMounted(async () => {
                 <button class="primary-button" type="submit" :disabled="createBusy"><span>{{ createBusy ? "正在建立 Session…" : "创建写作任务" }}</span><svg viewBox="0 0 20 20"><path d="m7 4 6 6-6 6"></path></svg></button>
             </form>
             <div class="rail-note"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"></circle><path d="M10 9v5M10 6.5v.5"></path></svg></div>
+            <div v-if="!leftCollapsed" class="panel-resizer left-resizer" role="separator" aria-label="调整任务栏宽度" @pointerdown="startResize('left', $event)"></div>
         </aside>
 
         <main class="conversation-stage">
             <header class="stage-header"><div><div class="eyebrow">LIVE SESSION</div><h1>写作对话</h1></div><div class="memory-badge"><span class="memory-pulse"></span>每章独立上下文</div></header>
             <nav v-if="userMessages.length > 1" class="conversation-index" aria-label="用户消息快速索引">
-                <button v-for="(item, index) in userMessages" :key="item.id" type="button" :class="['conversation-index-point', 'user', {active: index === activeIndex}]" :title="`第 ${index + 1} 条消息`" @click="scrollToConversationItem(item.id)"></button>
+                <button v-for="(item, index) in userMessages" :key="item.id" type="button" :class="['conversation-index-point', 'user', {active: index === activeIndex}]" :title="item.text" @mouseenter="showIndexPreview(index, $event)" @mouseleave="hoveredIndex = null" @click="scrollToConversationItem(item.id)"></button>
+                <div v-if="hoveredMessage" class="conversation-index-preview" :style="indexPreviewStyle" aria-live="polite">
+                    <strong>{{ hoveredMessage.text }}</strong>
+                    <p>{{ hoveredReply || 'Agent 尚未回复' }}</p>
+                </div>
             </nav>
             <div ref="conversationScroll" class="conversation-scroll" aria-live="polite" @scroll.passive="handleConversationScroll">
                 <div class="date-divider"><span>当前会话</span></div>
@@ -885,24 +996,21 @@ onMounted(async () => {
                         <div class="avatar agent-avatar">B</div>
                         <div class="message-body">
                             <div class="message-meta"><strong>Blueforge</strong><span>{{ item.streaming ? '正在生成' : '模型输出' }}</span></div>
-                            <div v-if="item.process.length" class="process-timeline">
-                                <template v-for="entry in item.process" :key="entry.id">
-                                    <div v-if="entry.kind === 'model-text' && item.streaming" class="message-copy streaming-output process-entry model-text" v-html="renderMarkdown(entry.content || '')"></div>
-                                    <div v-else-if="entry.kind === 'model-text'" class="message-copy process-entry model-text" v-html="renderMarkdown(entry.content || '')"></div>
-                                    <div v-else-if="entry.kind === 'status'" :class="['process-entry', 'timeline-status', {running: entry.running}]">
+                            <details v-if="executionEntries(item).length" class="execution-trace" :open="item.streaming">
+                                <summary>执行过程 · {{ executionEntries(item).length }} 项<span>{{ item.streaming ? '正在接收' : '已完成，点击展开' }}</span></summary>
+                                <div class="process-timeline">
+                                <template v-for="entry in executionEntries(item)" :key="entry.id">
+                                    <div v-if="entry.kind === 'status'" :class="['process-entry', 'timeline-status', {running: entry.running}]">
                                         <span>{{ entry.label }}</span><span>#{{ entry.sequence }} · {{ entry.meta }}</span>
                                     </div>
-                                    <section v-else-if="entry.kind === 'final-output'" class="process-entry final-output">
-                                        <div class="final-output-meta"><span>{{ entry.label }}</span><span>#{{ entry.sequence }} · {{ entry.meta }}</span></div>
-                                        <div v-if="item.streaming" class="message-copy streaming-output" v-html="renderMarkdown(entry.content || '')"></div>
-                                        <div v-else class="message-copy" v-html="renderMarkdown(entry.content || '')"></div>
-                                    </section>
                                     <details v-else :class="['timeline-detail', 'process-entry', entry.kind]" :open="entry.open">
                                         <summary><span>{{ entry.label }}</span><span class="timeline-detail-time">#{{ entry.sequence }} · {{ entry.meta }}</span></summary>
                                         <div class="timeline-detail-content">{{ entry.content }}</div>
                                     </details>
                                 </template>
-                            </div>
+                                </div>
+                            </details>
+                            <div v-if="modelOutput(item)" class="message-copy assistant-output" v-html="renderMarkdown(modelOutput(item))"></div>
                         </div>
                     </article>
                     <article v-else :ref="element => captureTarget(item.id, element)" :class="['chapter-review-card', {approved: item.approved}]"><div class="review-card-marker">01</div><div class="review-card-body"><div class="review-card-eyebrow">CHAPTER GATE · HUMAN REVIEW</div><strong>{{ item.review.title || '本章候选内容' }}</strong><p>请审阅本章候选正文。通过后，正文及关联的章节记忆、文档状态和临时计划才会一起进入正式成果区。</p><details class="review-card-preview" open><summary><span>候选正文预览</span><span>{{ item.approved ? '已提交' : '尚未提交' }}</span></summary><div class="review-card-preview-content" v-html="renderMarkdown(item.review.markdown)"></div></details><label v-if="!item.approved && !item.rejected" class="review-feedback"><span>修改意见（不会提交当前候选）</span><textarea v-model="item.feedback" rows="3" maxlength="4000" :disabled="running" placeholder="例如：补充实施依据，删去没有资料支撑的表述，并调整第二节的论证顺序。"></textarea></label><div class="review-card-footer"><span class="review-card-status">{{ item.status }}</span><div v-if="!item.approved && !item.rejected" class="review-actions"><button type="button" class="review-rewrite-button" :disabled="running || !item.feedback?.trim()" @click="rewriteReview(item)">{{ item.status === '正在根据意见重写…' ? '正在重写…' : '按意见重写' }}</button><button type="button" :disabled="running" @click="approveReview(item)">{{ item.status === '正在提交…' ? '正在提交…' : '通过并提交' }}</button></div></div></div></article>
@@ -911,7 +1019,7 @@ onMounted(async () => {
             <div class="composer-wrap"><div :class="['composer', {running: running && taskId === runningTaskId}]"><textarea v-model="messageInput" rows="1" maxlength="4000" :disabled="!canSend" :placeholder="composerPlaceholder" aria-label="发送给写作 Agent 的消息" @keydown.enter.exact.prevent="runRound()"></textarea><button type="button" :class="{'stop-mode': running && taskId === runningTaskId}" :disabled="!canSend" :aria-label="running && taskId === runningTaskId ? '停止当前生成' : '发送消息'" @click="running && taskId === runningTaskId ? stopRound() : runRound()"><svg class="send-icon" viewBox="0 0 24 24"><path d="M5 12h13M13 6l6 6-6 6"></path></svg><span class="stop-icon"></span></button></div><p :class="['composer-footnote', {reviewing: awaitingReview}]">{{ composerHint }}</p></div>
         </main>
 
-        <aside class="artifact-pane"><header class="artifact-header"><div><div class="eyebrow">ACCEPTED OUTPUT</div><h2>生成正文</h2></div><div class="artifact-actions"><span class="content-count">{{ contentCount }} 章</span><button class="icon-button" type="button" title="复制全部正文" :disabled="!rawContent" @click="copyContent"><svg viewBox="0 0 20 20"><rect x="6" y="6" width="9" height="10" rx="2"></rect><path d="M4 13H3.5A1.5 1.5 0 0 1 2 11.5v-8A1.5 1.5 0 0 1 3.5 2h8A1.5 1.5 0 0 1 13 3.5V4"></path></svg></button></div></header><div class="artifact-scroll"><div v-if="!artifactHtml" class="artifact-empty"><div class="empty-orbit"><span></span><span></span><span></span></div><h3>成果将在这里生长</h3><p>Agent 每完成并保存一章合格内容，它就会追加到这份文档中。</p></div><article v-else class="document"><section class="generated-block" v-html="artifactHtml"></section></article></div><footer class="artifact-footer"><span>{{ rawContent ? "正文已同步" : "等待第一章" }}</span><span class="live-indicator"><i></i> 自动同步</span></footer></aside>
+        <aside :class="['artifact-pane', {collapsed: rightCollapsed}]"><button class="panel-toggle right-toggle" type="button" :aria-label="rightCollapsed ? '展开成果栏' : '折叠成果栏'" @click="rightCollapsed = !rightCollapsed"><span>{{ rightCollapsed ? '‹' : '›' }}</span><b v-if="!rightCollapsed">成果</b></button><template v-if="!rightCollapsed"><header class="artifact-header"><div><div class="eyebrow">ACCEPTED OUTPUT</div><h2>生成正文</h2></div><div class="artifact-actions"><span class="content-count">{{ contentCount }} 章</span><button class="icon-button" type="button" title="复制全部正文" :disabled="!rawContent" @click="copyContent"><svg viewBox="0 0 20 20"><rect x="6" y="6" width="9" height="10" rx="2"></rect><path d="M4 13H3.5A1.5 1.5 0 0 1 2 11.5v-8A1.5 1.5 0 0 1 3.5 2h8A1.5 1.5 0 0 1 13 3.5V4"></path></svg></button></div></header><div class="artifact-scroll"><div v-if="!artifactHtml" class="artifact-empty"><div class="empty-orbit"><span></span><span></span><span></span></div><h3>成果将在这里生长</h3><p>Agent 每完成并保存一章合格内容，它就会追加到这份文档中。</p></div><article v-else class="document"><section class="generated-block" v-html="artifactHtml"></section></article></div><footer class="artifact-footer"><span>{{ rawContent ? "正文已同步" : "等待第一章" }}</span><span class="live-indicator"><i></i> 自动同步</span></footer></template><div class="panel-resizer right-resizer" role="separator" aria-label="调整成果栏宽度" @pointerdown="startResize('right', $event)"></div></aside>
     </div>
     <div :class="['toast', {show: toast, error: toastError}]" role="status">{{ toast }}</div>
 </template>

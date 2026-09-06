@@ -340,8 +340,8 @@ public class TaskWorkspaceService {
             writeText(resolveInside(outputs, stage.content().filename()), stage.markdown(), "提交章节正文失败");
             writeText(resolveInside(taskDirectory.resolve("memory/chapters"), stage.content().filename()),
                     stage.chapterMemory(), "提交章节记忆失败");
-            writeText(taskDirectory.resolve("memory/document-state.md"), stage.documentState(), "提交滚动文档状态失败");
-            writeText(taskDirectory.resolve("working-plan.json"), stage.workingPlan(), "提交临时章节计划失败");
+            writeText(taskDirectory.resolve("memory/document-state.md"), markCommitted(stage.documentState()), "提交滚动文档状态失败");
+            writeText(taskDirectory.resolve("working-plan.json"), markCommitted(stage.workingPlan()), "提交临时章节计划失败");
 
             List<ContentEntry> contents = new ArrayList<>(listContents(taskId));
             if (contents.stream().noneMatch(entry -> entry.filename().equals(stage.content().filename()))) {
@@ -411,6 +411,10 @@ public class TaskWorkspaceService {
         } catch (IOException e) {
             throw new IllegalStateException("保存 ChapterStage 失败", e);
         }
+    }
+
+    private String markCommitted(String value) {
+        return value == null ? null : value.replace("已暂存待审核", "已审核通过");
     }
 
     public WritingTaskView getTaskView(String taskId) {

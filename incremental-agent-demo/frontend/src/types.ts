@@ -31,6 +31,12 @@ export interface PendingReviewResponse {
     interrupts: AgentRunInterrupt[];
 }
 
+export interface ConversationHistory {
+    messages: Array<{id: string; runId?: string; role: string; content: string; sequenceNo: number; createdAt: string}>;
+    runs: Array<{id: string; status: string; createdAt: string; updatedAt: string}>;
+    events: Array<{runId: string; eventType: string; payload: string; toolCallId?: string; createdAt: string; sequenceNo: number}>;
+}
+
 export interface PendingReview {
     taskId: string;
     stageId: string;

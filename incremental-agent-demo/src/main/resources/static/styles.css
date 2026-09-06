@@ -68,7 +68,7 @@ button { color: inherit; }
     position: relative;
     z-index: 1;
     display: grid;
-    grid-template-columns: 288px minmax(420px, 1fr) minmax(390px, .92fr);
+    grid-template-columns: var(--left-width, 288px) minmax(420px, 1fr) var(--right-width, 390px);
     width: 100vw;
     height: 100vh;
 }
@@ -258,12 +258,17 @@ input:disabled, textarea:disabled { opacity: .52; cursor: not-allowed; }
 .memory-pulse { width: 5px; height: 5px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 9px rgba(77,156,255,.8); }
 
 .conversation-scroll { min-height: 0; overflow-y: auto; padding: 18px 9% 32px; }
-.conversation-index { position: absolute; z-index: 3; top: 94px; bottom: 112px; left: 13px; display: grid; align-content: center; justify-items: center; gap: 5px; width: 18px; pointer-events: none; }
-.conversation-index-point { width: 7px; height: 2px; min-width: 0; padding: 0; cursor: pointer; pointer-events: auto; border: 0; border-radius: 999px; background: rgba(98, 125, 153, .28); box-shadow: none; transition: width .18s ease, height .18s ease, background .18s ease, box-shadow .18s ease; }
-.conversation-index-point.user { background: rgba(47, 128, 237, .38); }
-.conversation-index-point.review { background: rgba(201, 133, 29, .48); }
-.conversation-index-point:hover, .conversation-index-point:focus-visible { width: 11px; background: #4a8fd5; outline: none; }
-.conversation-index-point.active { width: 12px; height: 3px; background: var(--blue); box-shadow: 0 0 8px rgba(47,128,237,.45); }
+.conversation-index { position: absolute; z-index: 3; top: 94px; bottom: 112px; left: 0; display: grid; align-content: center; justify-items: center; gap: 0; width: 30px; pointer-events: none; }
+.conversation-index::before { display: none; }
+.conversation-index-point { position: relative; width: 30px; height: 20px; min-width: 0; padding: 0; cursor: pointer; pointer-events: auto; border: 0; border-radius: 4px; background: transparent; box-shadow: none; transition: background .18s ease; }
+.conversation-index-point::before { content: ""; position: absolute; top: 50%; left: 15px; width: 7px; height: 2px; border-radius: 999px; background: rgba(98, 125, 153, .3); transform: translateY(-50%); transition: width .18s ease, height .18s ease, background .18s ease, box-shadow .18s ease; }
+.conversation-index-point:hover, .conversation-index-point:focus-visible { background: transparent; outline: none; }
+.conversation-index-point:hover::before, .conversation-index-point:focus-visible::before { width: 14px; background: #4a8fd5; }
+.conversation-index-point.active::before { width: 23px; height: 3px; background: #1f2933; box-shadow: 0 0 8px rgba(31,41,51,.22); }
+.conversation-index-preview { position: absolute; top: 0; left: 52px; width: min(350px, 32vw); padding: 11px 13px; overflow: hidden; color: #273746; border: 1px solid rgba(148, 163, 184, .25); border-radius: 13px; background: rgba(255,255,255,.94); box-shadow: 0 12px 28px rgba(45, 65, 84, .16); pointer-events: none; }
+.conversation-index-preview::before { content: ""; position: absolute; top: 18px; left: -6px; width: 10px; height: 10px; border-bottom: 1px solid rgba(148, 163, 184, .25); border-left: 1px solid rgba(148, 163, 184, .25); background: #fff; transform: rotate(45deg); }
+.conversation-index-preview strong { display: block; overflow: hidden; color: #253f5b; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
+.conversation-index-preview p { display: -webkit-box; margin: 7px 0 0; overflow: hidden; color: #7a8793; font-size: 11px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .date-divider { display: flex; align-items: center; gap: 12px; margin: 2px 0 25px; color: #8096ae; font: 9px var(--mono); letter-spacing: .08em; }
 .date-divider::before, .date-divider::after { content: ""; height: 1px; flex: 1; background: var(--line); }
 
@@ -454,14 +459,14 @@ input:disabled, textarea:disabled { opacity: .52; cursor: not-allowed; }
 @keyframes travel { 50% { transform: translateX(3px); } }
 
 @media (max-width: 1180px) {
-    .app-shell { grid-template-columns: 260px minmax(410px, 1fr) minmax(340px, .85fr); }
+    .app-shell { grid-template-columns: var(--left-width, 260px) minmax(410px, 1fr) var(--right-width, 340px); }
     .setup-rail { padding-inline: 16px; }
     .conversation-scroll { padding-inline: 6%; }
 }
 
 @media (max-width: 920px) {
     body { overflow: auto; }
-    .app-shell { grid-template-columns: 250px 1fr; grid-template-rows: minmax(650px, 100vh) minmax(520px, auto); height: auto; min-height: 100vh; }
+    .app-shell { grid-template-columns: var(--left-width, 250px) 1fr; grid-template-rows: minmax(650px, 100vh) minmax(520px, auto); height: auto; min-height: 100vh; }
     .setup-rail { grid-row: 1 / span 2; position: sticky; top: 0; height: 100vh; }
     .conversation-stage { min-height: 100vh; border-right: 0; }
     .artifact-pane { grid-column: 2; min-height: 650px; border-top: 1px solid var(--line); }
