@@ -53,7 +53,7 @@ public class AgentScopeWritingAgent implements WritingAgent {
             首次执行本章时，先加载适用于当前增量写作任务的工作区 skill，再按其流程完成本章。
             如果是同一章内的继续执行，基于当前 Session 中已有的工作和用户新消息继续，不要无条件重启已经完成的步骤。
             若技能流程判断全部必要章节均已完成，不要调用 save_content，直接说明完成依据。
-            当本章正文、章节记忆、滚动状态和临时计划都已暂存后，必须调用 commit_chapter(stage_id) 请求用户审核；不要自行宣布提交成功。
+            当本章正文、章节记忆、滚动状态和临时计划都已暂存后，必须调用 commit_chapter 请求用户审核；目标 Stage 已由当前 Run 上下文绑定，不要自行构造 stage_id，也不要自行宣布提交成功。
             """;
 
     private static final String RECOVER_STAGE_REQUEST = """
@@ -61,13 +61,13 @@ public class AgentScopeWritingAgent implements WritingAgent {
 
             目标 ChapterStage：%s。
             这是一次受限的故障恢复，不接收也不处理新的用户写作要求。先调用 read_staged_chapter，确认候选正文和缺失字段；随后仅补齐缺失的 save_chapter_memory、update_document_state、update_working_plan。
-            不得调用资料 Agent、原文读取、save_document_summary 或 save_content，不得重写正文。候选 Stage 完整后必须调用 commit_chapter(stage_id) 请求用户审核。
+            不得调用资料 Agent、原文读取、save_document_summary 或 save_content，不得重写正文。候选 Stage 完整后必须调用 commit_chapter 请求用户审核，目标 Stage 由当前 Run 上下文绑定。
             """;
 
     private static final String REQUEST_CHAPTER_COMMIT = """
             执行内部命令：REQUEST_CHAPTER_COMMIT。
 
-            目标 ChapterStage：%s。先调用 read_staged_chapter 核对该 Stage 已完整，然后只调用 commit_chapter(stage_id) 请求用户审核。不得改写正文、章节记忆、滚动状态或临时计划，不接收也不处理新的用户写作要求。
+            目标 ChapterStage：%s。先调用 read_staged_chapter 核对该 Stage 已完整，然后只调用 commit_chapter 请求用户审核，目标 Stage 由当前 Run 上下文绑定。不得改写正文、章节记忆、滚动状态或临时计划，不接收也不处理新的用户写作要求。
             """;
 
     private final HarnessAgent agent;

@@ -183,10 +183,37 @@ class AgentScopeHitlFlowTest {
         assertThat(directory.resolve("state/runs")).doesNotExist();
     }
 
+    @Test
+    void legacyStageArgumentCannotRedirectCommitAwayFromTheRunBoundStage() throws Exception {
+        model.responses.add(() -> new ToolUseBlock("prepare-original", "prepare_candidate",
+                Map.of("text", "第一版正文")));
+        model.responses.add(() -> new ToolUseBlock("commit-invalid", "commit_chapter",
+                Map.of("stage_id", "chapter-001-active")));
+        var initial = runner.run(task.id()).collectList().block(Duration.ofSeconds(20));
+        String runId = initial.getFirst().getRunId();
+        String sessionId = runtime.find(runId).threadId();
+        String stageId = workspace.findOpenChapterStage(task.id()).stageId();
+        model.responses.add(() -> TextBlock.builder().text("章节提交完成").build());
+
+        var resumed = runner.resume(task.id(), runId,
+                        List.of(new AgentRunDecision("commit-invalid", true)))
+                .collectList().block(Duration.ofSeconds(20));
+
+        assertThat(resumed).noneMatch(AguiEvent.RunError.class::isInstance)
+                .allMatch(event -> runId.equals(event.getRunId()) && sessionId.equals(event.getThreadId()));
+        assertThat(workspace.readChapterStage(task.id(), stageId)).contains("\"COMMITTED\"");
+        assertThat(workspace.findOpenChapterStage(task.id())).isNull();
+        assertThat(workspace.listContents(task.id())).hasSize(1);
+        assertThat(runtime.find(runId).status()).isEqualTo(AgentRunStatus.FINISHED);
+        assertThat(runtime.find(runId).pendingInterrupts()).isEmpty();
+        assertThat(toolResults(runId)).filteredOn(result -> "commit-invalid".equals(result.getId()))
+                .singleElement().satisfies(result -> assertThat(result.getState()).isEqualTo(ToolResultState.SUCCESS));
+        assertThat(toolCalls(runId)).noneMatch(call -> call.getState() == ToolCallState.ASKING);
+    }
+
     private void enqueueCandidate(String id, String text) {
         model.responses.add(() -> new ToolUseBlock("prepare-" + id, "prepare_candidate", Map.of("text", text)));
-        model.responses.add(() -> new ToolUseBlock("commit-" + id, "commit_chapter",
-                Map.of("stage_id", workspace.findOpenChapterStage(task.id()).stageId())));
+        model.responses.add(() -> new ToolUseBlock("commit-" + id, "commit_chapter", Map.of()));
     }
 
     private List<Msg> persistedContext(String runId) {

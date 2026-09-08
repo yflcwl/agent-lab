@@ -129,14 +129,6 @@ public final class WritingToolContext {
         return stage;
     }
 
-    public synchronized ChapterStage requireCurrentStage(String requestedStageId) {
-        ChapterStage current = requireCurrentStage();
-        if (!current.stageId().equals(requestedStageId)) {
-            throw new IllegalArgumentException("当前 Run 只能访问 ChapterStage: " + current.stageId());
-        }
-        return current;
-    }
-
     public synchronized void markCommitted(ContentEntry content) {
         committedContent = content;
     }

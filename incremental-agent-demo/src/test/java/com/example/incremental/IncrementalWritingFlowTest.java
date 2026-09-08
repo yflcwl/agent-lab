@@ -216,10 +216,6 @@ class IncrementalWritingFlowTest {
         assertThatThrownBy(() -> writingTools.readStagedChapter(new WritingToolContext(task.id())))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("尚未绑定 ChapterStage");
-        assertThatThrownBy(() -> writingTools.commitChapter(
-                currentStage.content().filename(), context))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("当前 Run 只能访问 ChapterStage");
     }
 
     @Test

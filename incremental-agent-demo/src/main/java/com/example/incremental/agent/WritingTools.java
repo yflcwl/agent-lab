@@ -120,12 +120,12 @@ public class WritingTools {
         return "章节记忆已暂存: memory/chapters/" + filename;
     }
 
-    @Tool(name = "commit_chapter", description = "请求提交完整 ChapterStage。仅当正文、章节记忆、滚动状态和临时计划都已暂存时调用；此操作需要用户审核确认。")
+    @Tool(name = "commit_chapter", description = "请求提交当前 Run 绑定的完整 ChapterStage。仅当正文、章节记忆、滚动状态和临时计划都已暂存时调用；此操作需要用户审核确认。")
     public String commitChapter(
-            @ToolParam(name = "stage_id", description = "当前完整 ChapterStage 的 stageId") String stageId,
+            @ToolParam(name = "stage_id", description = "兼容已有会话的可选字段；实际目标由当前 Run 上下文决定", required = false) String ignoredStageId,
             WritingToolContext context) {
         ChapterStageCoordinator.ChapterCommit commit = chapterStageCoordinator.commitIfComplete(
-                context.taskId(), context.requireCurrentStage(stageId));
+                context.taskId(), context.requireCurrentStage());
         context.markCommitted(commit.content());
         return "章节已提交: " + commit.content().filename();
     }

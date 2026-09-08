@@ -85,9 +85,6 @@ public class WritingWorkflow {
             return new AgentResumeInput(task, new WritingToolContext(taskId, stage), "", null);
         }
         requireAwaitingReview(stage);
-        if (reviews.stream().anyMatch(review -> !isCurrentStageReference(stage, review.toolInput().get("stage_id")))) {
-            throw new IllegalStateException("待确认的 commit_chapter 与当前 ChapterStage 不一致");
-        }
         List<AgentRunDecision> reviewDecisions = decisions.stream()
                 .filter(decision -> reviews.stream().anyMatch(review -> review.toolCallId().equals(decision.toolCallId())))
                 .toList();
@@ -115,10 +112,6 @@ public class WritingWorkflow {
                         + "旧 Stage " + stage.stageId() + " 已废弃，不得提交旧 Stage 或将其视为已完成内容。"
                         + "请重新完成正文、章节记忆、滚动状态和临时计划的暂存，再调用 commit_chapter 请求新一轮审核。"
                         + "\n\n审核意见：\n" + feedback, stage.stageId());
-    }
-
-    private boolean isCurrentStageReference(ChapterStage stage, Object reference) {
-        return stage.stageId().equals(reference);
     }
 
     public Flux<AguiEvent> completeAgentEvents(
