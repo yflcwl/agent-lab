@@ -1,5 +1,6 @@
 package com.example.incremental.persistence.agent;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.example.incremental.persistence.agent.mapper.AgentRunMapper;
 import com.example.incremental.runtime.*;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -59,7 +60,12 @@ public class PostgresAgentRunRepository implements AgentRunRepository {
 
     @Override
     public AgentRunRecord findAwaitingConfirmation(String correlationId) {
-        AgentRun run = mapper.findAwaitingConfirmation(correlationId);
+        AgentRun run = mapper.selectOne(Wrappers.<AgentRun>lambdaQuery()
+                .eq(AgentRun::getCorrelationId, correlationId)
+                .eq(AgentRun::getStatus, AgentRunStatus.AWAITING_CONFIRM)
+                .apply("pending_interrupts <> CAST({0} AS JSONB)", "[]")
+                .orderByDesc(AgentRun::getUpdatedAt)
+                .last("LIMIT 1"));
         return run == null ? null : record(run);
     }
 
@@ -68,9 +74,23 @@ public class PostgresAgentRunRepository implements AgentRunRepository {
     public void transition(AgentRunRecord expected, AgentRunStatus status, List<AgentRunInterrupt> interrupts,
                            String errorCode, String errorMessage) {
         Instant now = Instant.now();
-        if (mapper.transition(expected.runId(), expected.lockVersion(), status, json(interrupts),
-                errorCode, errorMessage, status == AgentRunStatus.RUNNING ? now : null,
-                status.terminal() ? now : null, now) != 1) {
+        AgentRun run = mapper.selectById(expected.runId());
+        if (run == null || run.lockVersion() != expected.lockVersion()) {
+            throw new IllegalStateException("Run 状态已被其他请求修改，请重新读取");
+        }
+        run.setStatus(status);
+        run.setPendingInterruptsJson(json(interrupts));
+        run.setErrorCode(errorCode);
+        run.setErrorMessage(errorMessage);
+        if (run.getStartedAt() == null && status == AgentRunStatus.RUNNING) {
+            run.setStartedAt(now);
+        }
+        run.setFinishedAt(status.terminal() ? now : null);
+        run.setUpdatedAt(now);
+        run.setLockVersion(expected.lockVersion() + 1);
+        if (mapper.update(run, Wrappers.<AgentRun>lambdaUpdate()
+                .eq(AgentRun::getId, expected.runId())
+                .eq(AgentRun::getLockVersion, expected.lockVersion())) != 1) {
             throw new IllegalStateException("Run 状态已被其他请求修改，请重新读取");
         }
         history.saveRunEvent(expected.runId(), AgentRunEventType.RUN_STATE_CHANGED,

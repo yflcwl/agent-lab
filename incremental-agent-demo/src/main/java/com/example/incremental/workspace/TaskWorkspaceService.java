@@ -2,6 +2,7 @@ package com.example.incremental.workspace;
 
 import com.example.incremental.config.DemoProperties;
 import com.example.incremental.writing.ChapterStage;
+import com.example.incremental.writing.ChapterStageRepository;
 import com.example.incremental.writing.ChapterStageStatus;
 import com.example.incremental.writing.ContentEntry;
 import com.example.incremental.writing.WritingTask;
@@ -37,17 +38,18 @@ public class TaskWorkspaceService {
     private static final int MAX_DOCUMENT_STATE_LENGTH = 12_000;
     private static final int MAX_CHAPTER_MEMORY_LENGTH = 6_000;
     private static final int MAX_DOCUMENT_SUMMARY_LENGTH = 30_000;
-    private static final String STAGES_DIRECTORY = "stages";
-
     private static final TypeReference<List<ContentEntry>> CONTENT_LIST = new TypeReference<>() {
     };
 
     private final ObjectMapper objectMapper;
     private final Path dataRoot;
+    private final ChapterStageRepository chapterStages;
 
-    public TaskWorkspaceService(ObjectMapper objectMapper, DemoProperties properties) {
+    public TaskWorkspaceService(
+            ObjectMapper objectMapper, DemoProperties properties, ChapterStageRepository chapterStages) {
         this.objectMapper = objectMapper;
         this.dataRoot = properties.getDataRoot().toAbsolutePath().normalize();
+        this.chapterStages = chapterStages;
     }
 
     public WritingTask createTask(String userId, String referenceDocument, Map<String, String> sources) {
@@ -64,7 +66,6 @@ public class TaskWorkspaceService {
             Files.createDirectories(taskDirectory.resolve("sources"));
             Files.createDirectories(taskDirectory.resolve("outputs"));
             Files.createDirectories(taskDirectory.resolve("memory/chapters"));
-            Files.createDirectories(taskDirectory.resolve(STAGES_DIRECTORY));
             writeJson(taskDirectory.resolve("task.json"), task);
             Files.writeString(taskDirectory.resolve("reference-document.md"),
                     referenceDocument.trim(), StandardCharsets.UTF_8);
@@ -207,7 +208,7 @@ public class TaskWorkspaceService {
             }
             ChapterStage stage = requireOpenStage(taskId, stageId).withWorkingPlan(
                     objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(json));
-            writeStage(stage);
+            chapterStages.save(stage);
             return stage;
         } catch (IOException e) {
             throw new IllegalArgumentException("plan 不是合法 JSON", e);
@@ -225,7 +226,7 @@ public class TaskWorkspaceService {
     public synchronized ChapterStage stageDocumentState(String taskId, String stageId, String state) {
         requireTextWithinLimit(state, "state", MAX_DOCUMENT_STATE_LENGTH);
         ChapterStage stage = requireOpenStage(taskId, stageId).withDocumentState(state.trim());
-        writeStage(stage);
+        chapterStages.save(stage);
         return stage;
     }
 
@@ -252,30 +253,13 @@ public class TaskWorkspaceService {
     public synchronized ChapterStage stageChapterMemory(String taskId, String stageId, String memory) {
         requireTextWithinLimit(memory, "memory", MAX_CHAPTER_MEMORY_LENGTH);
         ChapterStage stage = requireOpenStage(taskId, stageId).withChapterMemory(memory.trim());
-        writeStage(stage);
+        chapterStages.save(stage);
         return stage;
     }
 
     public synchronized ChapterStage findOpenChapterStage(String taskId) {
         findTask(taskId);
-        Path directory = taskDirectory(taskId).resolve(STAGES_DIRECTORY);
-        ChapterStage latest = null;
-        for (String filename : listFiles(directory)) {
-            try {
-                ChapterStage stage = objectMapper.readValue(resolveInside(directory, filename).toFile(), ChapterStage.class);
-                if (!taskId.equals(stage.taskId())
-                        || stage.status() == ChapterStageStatus.COMMITTED
-                        || stage.status() == ChapterStageStatus.REJECTED) {
-                    continue;
-                }
-                if (latest == null || stage.createdAt().isAfter(latest.createdAt())) {
-                    latest = stage;
-                }
-            } catch (IOException e) {
-                throw new IllegalStateException("读取 ChapterStage 失败", e);
-            }
-        }
-        return latest;
+        return chapterStages.findOpen(taskId);
     }
 
     public String readChapterStage(String taskId, String stageId) {
@@ -321,7 +305,7 @@ public class TaskWorkspaceService {
                 StringUtils.hasText(referenceBasis) ? referenceBasis.trim() : "", filename, Instant.now());
         ChapterStage stage = new ChapterStage(UUID.randomUUID().toString(), taskId, entry, content.trim(),
                 null, null, null, ChapterStageStatus.STAGED, Instant.now(), null);
-        writeStage(stage);
+        chapterStages.create(stage);
         return stage;
     }
 
@@ -333,7 +317,7 @@ public class TaskWorkspaceService {
         if (!stage.isComplete()) {
             throw new IllegalStateException("ChapterStage 尚未完整，不能提交: " + stageId);
         }
-        writeStage(stage.withStatus(ChapterStageStatus.COMMITTING, null));
+        chapterStages.save(stage.withStatus(ChapterStageStatus.COMMITTING, null));
         Path taskDirectory = taskDirectory(taskId);
         Path outputs = taskDirectory.resolve("outputs");
         try {
@@ -348,7 +332,7 @@ public class TaskWorkspaceService {
                 contents.add(stage.content());
                 writeJson(outputs.resolve("index.json"), contents);
             }
-            writeStage(stage.withStatus(ChapterStageStatus.COMMITTED, Instant.now()));
+            chapterStages.save(stage.withStatus(ChapterStageStatus.COMMITTED, Instant.now()));
             return stage.content();
         } catch (IOException e) {
             throw new IllegalStateException("提交 ChapterStage 失败，可使用相同 stageId 重试", e);
@@ -363,7 +347,7 @@ public class TaskWorkspaceService {
         if (stage.status() != ChapterStageStatus.STAGED || !stage.isComplete()) {
             throw new IllegalStateException("ChapterStage 尚未完整，不能等待章节审核: " + stageId);
         }
-        writeStage(stage.withStatus(ChapterStageStatus.AWAITING_REVIEW, null));
+        chapterStages.save(stage.withStatus(ChapterStageStatus.AWAITING_REVIEW, null));
     }
 
     public synchronized void rejectChapterStage(String taskId, String stageId) {
@@ -371,7 +355,7 @@ public class TaskWorkspaceService {
         if (stage.status() != ChapterStageStatus.AWAITING_REVIEW) {
             throw new IllegalStateException("当前 ChapterStage 不在等待审核状态: " + stageId);
         }
-        writeStage(stage.withStatus(ChapterStageStatus.REJECTED, null));
+        chapterStages.save(stage.withStatus(ChapterStageStatus.REJECTED, null));
     }
 
     private ChapterStage requireOpenStage(String taskId, String stageId) {
@@ -387,30 +371,11 @@ public class TaskWorkspaceService {
         if (!StringUtils.hasText(stageId) || !stageId.matches("[0-9a-fA-F-]{36}")) {
             throw new IllegalArgumentException("stageId 不合法");
         }
-        Path file = resolveInside(taskDirectory(taskId).resolve(STAGES_DIRECTORY), stageId + ".json");
-        try {
-            if (!Files.isRegularFile(file)) {
-                throw new IllegalArgumentException("ChapterStage 不存在: " + stageId);
-            }
-            ChapterStage stage = objectMapper.readValue(file.toFile(), ChapterStage.class);
-            if (!taskId.equals(stage.taskId())) {
-                throw new IllegalArgumentException("ChapterStage 不属于当前任务: " + stageId);
-            }
-            return stage;
-        } catch (IOException e) {
-            throw new IllegalStateException("读取 ChapterStage 失败", e);
+        ChapterStage stage = chapterStages.findById(taskId, stageId);
+        if (stage == null) {
+            throw new IllegalArgumentException("ChapterStage 不存在: " + stageId);
         }
-    }
-
-    private void writeStage(ChapterStage stage) {
-        try {
-            Path file = resolveInside(taskDirectory(stage.taskId()).resolve(STAGES_DIRECTORY),
-                    stage.stageId() + ".json");
-            Files.createDirectories(file.getParent());
-            writeJson(file, stage);
-        } catch (IOException e) {
-            throw new IllegalStateException("保存 ChapterStage 失败", e);
-        }
+        return stage;
     }
 
     private String markCommitted(String value) {

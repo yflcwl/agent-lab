@@ -5,6 +5,7 @@ import com.example.incremental.migration.LegacyRunImporter;
 import com.example.incremental.migration.LegacyRunImportApplication;
 import com.example.incremental.persistence.agent.AgentHistoryService;
 import com.example.incremental.persistence.agent.PostgresAgentRunRepository;
+import com.example.incremental.persistence.writing.InMemoryChapterStageRepository;
 import com.example.incremental.workspace.TaskWorkspaceService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agui.event.AguiEvent;
@@ -142,7 +143,8 @@ class PostgresAgentRunRepositoryTest {
     @Test
     void legacyImportIsExplicitIdempotentAndPreservesAgentScopeState() throws Exception {
         var json = context.getBean(ObjectMapper.class);
-        var task = new TaskWorkspaceService(json, properties).createTask("owner", "# reference", Map.of("source.md", "data"));
+        var task = new TaskWorkspaceService(json, properties, new InMemoryChapterStageRepository())
+                .createTask("owner", "# reference", Map.of("source.md", "data"));
         String runId = "writing-" + UUID.randomUUID();
         Path runDirectory = properties.getStateRoot().resolve("runs");
         Files.createDirectories(runDirectory);
@@ -187,7 +189,8 @@ class PostgresAgentRunRepositoryTest {
     @Test
     void malformedLegacyFileRollsBackTheWholeBatch() throws Exception {
         var json = context.getBean(ObjectMapper.class);
-        var task = new TaskWorkspaceService(json, properties).createTask("owner", "# reference", Map.of());
+        var task = new TaskWorkspaceService(json, properties, new InMemoryChapterStageRepository())
+                .createTask("owner", "# reference", Map.of());
         var runDirectory = properties.getStateRoot().resolve("runs");
         Files.createDirectories(runDirectory);
         var now = java.time.Instant.now();

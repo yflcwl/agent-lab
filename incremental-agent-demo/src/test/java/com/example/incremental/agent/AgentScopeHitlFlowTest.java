@@ -1,6 +1,7 @@
 package com.example.incremental.agent;
 
 import com.example.incremental.config.DemoProperties;
+import com.example.incremental.persistence.writing.InMemoryChapterStageRepository;
 import com.example.incremental.persistence.agent.AgentHistoryService;
 import com.example.incremental.runtime.AgentRunDecision;
 import com.example.incremental.runtime.AgentRunRuntime;
@@ -73,7 +74,7 @@ class AgentScopeHitlFlowTest {
         properties.setDataRoot(directory.resolve("data"));
         properties.setStateRoot(directory.resolve("state"));
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        workspace = new TaskWorkspaceService(mapper, properties);
+        workspace = new TaskWorkspaceService(mapper, properties, new InMemoryChapterStageRepository());
         ChapterStageCoordinator coordinator = new ChapterStageCoordinator(workspace);
         WritingTools writingTools = new WritingTools(workspace, coordinator);
         Toolkit toolkit = new Toolkit();

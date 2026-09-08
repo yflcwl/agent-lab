@@ -1,5 +1,6 @@
 package com.example.incremental.persistence.agent;
 
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.example.incremental.persistence.agent.mapper.AgentConversationMapper;
 import com.example.incremental.persistence.agent.mapper.AgentMessageMapper;
 import com.example.incremental.persistence.agent.mapper.AgentRunEventMapper;
@@ -65,7 +66,7 @@ public class AgentHistoryService {
     @Transactional
     public AgentConversation getOrCreateConversation(
             String conversationId, String tenantId, String userId, String agentId, String title) {
-        AgentConversation existing = conversationMapper.findById(conversationId);
+        AgentConversation existing = conversationMapper.selectById(conversationId);
         return existing == null ? createConversation(conversationId, tenantId, userId, agentId, title) : existing;
     }
 
@@ -89,7 +90,10 @@ public class AgentHistoryService {
             throw new IllegalArgumentException("role 和 status 不能为空");
         }
         validateJson(contentJson, "contentJson");
-        AgentConversation conversation = conversationMapper.lockById(conversationId);
+        AgentConversation conversation = conversationMapper.selectOne(
+                Wrappers.<AgentConversation>lambdaQuery()
+                        .eq(AgentConversation::getId, conversationId)
+                        .last("FOR UPDATE"));
         if (conversation == null) {
             throw new IllegalArgumentException("Conversation 不存在: " + conversationId);
         }
@@ -100,11 +104,17 @@ public class AgentHistoryService {
             }
         }
         Instant now = Instant.now();
+        AgentMessage lastMessage = messageMapper.selectOne(Wrappers.<AgentMessage>lambdaQuery()
+                .select(AgentMessage::getSequenceNo)
+                .eq(AgentMessage::getConversationId, conversationId)
+                .orderByDesc(AgentMessage::getSequenceNo)
+                .last("LIMIT 1"));
         AgentMessage message = new AgentMessage(
                 UUID.randomUUID().toString(), conversationId, runId, role, content, contentJson,
-                status, messageMapper.nextSequenceNo(conversationId), now);
+                status, lastMessage == null ? 1 : lastMessage.sequenceNo() + 1, now);
         messageMapper.insert(message);
-        conversationMapper.touch(conversationId, now);
+        conversation.setUpdatedAt(now);
+        conversationMapper.updateById(conversation);
         return message;
     }
 
@@ -122,12 +132,20 @@ public class AgentHistoryService {
         }
         requireText(payload, "payload", Integer.MAX_VALUE);
         validateJson(payload, "payload");
-        AgentRun run = runMapper.lockById(runId);
+        AgentRun run = runMapper.selectOne(Wrappers.<AgentRun>lambdaQuery()
+                .eq(AgentRun::getId, runId)
+                .last("FOR UPDATE"));
         if (run == null) {
             throw new IllegalArgumentException("Run 不存在: " + runId);
         }
+        AgentRunEvent lastEvent = runEventMapper.selectOne(Wrappers.<AgentRunEvent>lambdaQuery()
+                .select(AgentRunEvent::getSequenceNo)
+                .eq(AgentRunEvent::getRunId, runId)
+                .orderByDesc(AgentRunEvent::getSequenceNo)
+                .last("LIMIT 1"));
         AgentRunEvent event = new AgentRunEvent(
-                UUID.randomUUID().toString(), runId, run.conversationId(), runEventMapper.nextSequenceNo(runId),
+                UUID.randomUUID().toString(), runId, run.conversationId(),
+                lastEvent == null ? 1 : lastEvent.sequenceNo() + 1,
                 eventType, payload, replyId, blockId, toolCallId, Instant.now());
         runEventMapper.insert(event);
         return event;
@@ -137,16 +155,26 @@ public class AgentHistoryService {
     public List<AgentMessage> findMessages(String conversationId, long offset, int limit) {
         requireText(conversationId, "conversationId", 64);
         validatePage(offset, limit);
-        return messageMapper.findByConversationId(conversationId, offset, limit);
+        return messageMapper.selectList(Wrappers.<AgentMessage>lambdaQuery()
+                .eq(AgentMessage::getConversationId, conversationId)
+                .orderByAsc(AgentMessage::getSequenceNo)
+                .last("LIMIT " + limit + " OFFSET " + offset));
     }
 
     @Transactional(readOnly = true)
     public AgentConversationHistory findHistory(String conversationId) {
         requireText(conversationId, "conversationId", 64);
         return new AgentConversationHistory(
-                messageMapper.findByConversationId(conversationId, 0, MAX_PAGE_SIZE),
-                runMapper.findByConversationId(conversationId),
-                runEventMapper.findByConversationId(conversationId));
+                messageMapper.selectList(Wrappers.<AgentMessage>lambdaQuery()
+                        .eq(AgentMessage::getConversationId, conversationId)
+                        .orderByAsc(AgentMessage::getSequenceNo)
+                        .last("LIMIT " + MAX_PAGE_SIZE)),
+                runMapper.selectList(Wrappers.<AgentRun>lambdaQuery()
+                        .eq(AgentRun::getConversationId, conversationId)
+                        .orderByAsc(AgentRun::getCreatedAt)),
+                runEventMapper.selectList(Wrappers.<AgentRunEvent>lambdaQuery()
+                        .eq(AgentRunEvent::getConversationId, conversationId)
+                        .orderByAsc(AgentRunEvent::getCreatedAt, AgentRunEvent::getSequenceNo)));
     }
 
     @Transactional(readOnly = true)
@@ -156,7 +184,16 @@ public class AgentHistoryService {
         }
         requireText(userId, "userId", 64);
         validatePage(offset, limit);
-        return conversationMapper.findActiveByUser(tenantId, userId, offset, limit);
+        var query = Wrappers.<AgentConversation>lambdaQuery()
+                .eq(AgentConversation::getUserId, userId)
+                .eq(AgentConversation::getStatus, ConversationStatus.ACTIVE);
+        if (tenantId == null) {
+            query.isNull(AgentConversation::getTenantId);
+        } else {
+            query.eq(AgentConversation::getTenantId, tenantId);
+        }
+        return conversationMapper.selectList(query.orderByDesc(AgentConversation::getUpdatedAt)
+                .last("LIMIT " + limit + " OFFSET " + offset));
     }
 
     private void validateJson(String json, String fieldName) {
