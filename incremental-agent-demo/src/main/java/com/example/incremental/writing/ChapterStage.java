@@ -26,6 +26,11 @@ public record ChapterStage(
                 && StringUtils.hasText(workingPlan);
     }
 
+    @JsonIgnore
+    public boolean isReadyForReview() {
+        return content != null && StringUtils.hasText(markdown);
+    }
+
     public ChapterStage withChapterMemory(String value) {
         return new ChapterStage(stageId, taskId, content, markdown, value, documentState,
                 workingPlan, status, createdAt, committedAt);

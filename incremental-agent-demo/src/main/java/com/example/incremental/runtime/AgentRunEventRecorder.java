@@ -82,7 +82,8 @@ public class AgentRunEventRecorder {
                 return;
             }
             if (event instanceof AguiEvent.RunError error) {
-                persistAssistantMessage(history, event.getRunId(), assistantContent, AgentMessageStatus.FAILED);
+                persistAssistantMessage(history, event.getRunId(), failureContent(assistantContent, error.message()),
+                        AgentMessageStatus.FAILED);
                 history.historyService().saveRunEvent(event.getRunId(), AgentRunEventType.RUN_FAILED,
                         eventPayload(event, "errorCode", error.code(), "errorMessage", error.message()),
                         null, null, null);
@@ -109,7 +110,8 @@ public class AgentRunEventRecorder {
             }
         }).doOnError(error -> {
             if (finalized.compareAndSet(false, true)) {
-                persistAssistantMessage(history, history.runId(), assistantContent, AgentMessageStatus.FAILED);
+                persistAssistantMessage(history, history.runId(), failureContent(assistantContent, safeMessage(error)),
+                        AgentMessageStatus.FAILED);
                 history.historyService().saveRunEvent(history.runId(), AgentRunEventType.RUN_FAILED,
                         eventPayload(null, "errorMessage", safeMessage(error)), null, null, null);
             }
@@ -129,6 +131,14 @@ public class AgentRunEventRecorder {
             history.historyService().saveMessage(history.conversationId(), runId,
                     AgentMessageRole.ASSISTANT, content.toString(), null, status);
         }
+    }
+
+    private StringBuilder failureContent(StringBuilder assistantContent, String errorMessage) {
+        StringBuilder content = new StringBuilder(assistantContent);
+        if (!content.isEmpty()) {
+            content.append("\n\n");
+        }
+        return content.append("本轮执行失败：").append(errorMessage);
     }
 
     private String eventPayload(AguiEvent event, Object... fields) {

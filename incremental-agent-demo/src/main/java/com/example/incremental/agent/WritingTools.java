@@ -39,7 +39,6 @@ public class WritingTools {
         return workspaceService.readWorkingPlan(context.taskId());
     }
 
-    @Tool(name = "update_working_plan", description = "更新临时章节计划。计划可以根据用户意见和写作进展改变，不是预先写死的任务队列；本轮最多调用一次。")
     public String updateWorkingPlan(
             @ToolParam(name = "plan", description = "完整 JSON 对象，至少表达已完成章节、下一方向、剩余方向和本次调整原因") String plan,
             WritingToolContext context) {
@@ -53,7 +52,6 @@ public class WritingTools {
         return workspaceService.readDocumentState(context.taskId());
     }
 
-    @Tool(name = "update_document_state", description = "用本章完成后的最新整体状态覆盖滚动文档状态，不得拼接全部章节摘要；本轮最多调用一次。")
     public String updateDocumentState(
             @ToolParam(name = "state", description = "不超过 12000 字符的完整 Markdown 状态快照") String state,
             WritingToolContext context) {
@@ -111,7 +109,6 @@ public class WritingTools {
         return "正文已暂存: " + saved.filename() + "，请继续暂存章节记忆、滚动状态和临时计划";
     }
 
-    @Tool(name = "save_chapter_memory", description = "为本轮刚暂存的正文建立独立章节记忆，记录摘要、事实来源、术语、跨章约束和后续衔接；必须在 save_content 之后调用，本轮最多一次。")
     public String saveChapterMemory(
             @ToolParam(name = "memory", description = "不超过 6000 字符的 Markdown 章节记忆") String memory,
             WritingToolContext context) {
@@ -120,10 +117,26 @@ public class WritingTools {
         return "章节记忆已暂存: memory/chapters/" + filename;
     }
 
-    @Tool(name = "commit_chapter", description = "请求提交当前 Run 绑定的完整 ChapterStage。仅当正文、章节记忆、滚动状态和临时计划都已暂存时调用；此操作需要用户审核确认。")
+    @Tool(name = "commit_chapter", description = "请求提交当前 Run 绑定的候选正文并进入用户审核。用户通过后才会写入章节记忆、滚动状态和临时计划，再正式提交。")
     public String commitChapter(
             @ToolParam(name = "stage_id", description = "兼容已有会话的可选字段；实际目标由当前 Run 上下文决定", required = false) String ignoredStageId,
+            @ToolParam(name = "chapter_memory", description = "用户通过审核后写入的本章 Markdown 记忆，记录摘要、事实来源、术语、跨章约束和后续衔接") String chapterMemory,
+            @ToolParam(name = "document_state", description = "用户通过审核后写入的完整 Markdown 滚动文档状态") String documentState,
+            @ToolParam(name = "working_plan", description = "用户通过审核后写入的完整 JSON 临时章节计划") String workingPlan,
             WritingToolContext context) {
+        context.saveChapterMemory(() -> workspaceService.stageChapterMemory(
+                context.taskId(), context.stageId(), chapterMemory));
+        context.saveDocumentState(() -> workspaceService.stageDocumentState(
+                context.taskId(), context.stageId(), documentState));
+        context.saveWorkingPlan(() -> workspaceService.stageWorkingPlan(
+                context.taskId(), context.stageId(), workingPlan));
+        ChapterStageCoordinator.ChapterCommit commit = chapterStageCoordinator.commitIfComplete(
+                context.taskId(), context.requireCurrentStage());
+        context.markCommitted(commit.content());
+        return "章节已提交: " + commit.content().filename();
+    }
+
+    public String commitChapter(String ignoredStageId, WritingToolContext context) {
         ChapterStageCoordinator.ChapterCommit commit = chapterStageCoordinator.commitIfComplete(
                 context.taskId(), context.requireCurrentStage());
         context.markCommitted(commit.content());

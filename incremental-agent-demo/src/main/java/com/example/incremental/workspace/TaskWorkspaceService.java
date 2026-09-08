@@ -344,8 +344,8 @@ public class TaskWorkspaceService {
         if (stage.status() == ChapterStageStatus.AWAITING_REVIEW) {
             return;
         }
-        if (stage.status() != ChapterStageStatus.STAGED || !stage.isComplete()) {
-            throw new IllegalStateException("ChapterStage 尚未完整，不能等待章节审核: " + stageId);
+        if (stage.status() != ChapterStageStatus.STAGED || !stage.isReadyForReview()) {
+            throw new IllegalStateException("ChapterStage 尚未保存正文，不能等待章节审核: " + stageId);
         }
         chapterStages.save(stage.withStatus(ChapterStageStatus.AWAITING_REVIEW, null));
     }

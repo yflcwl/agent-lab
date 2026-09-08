@@ -113,7 +113,13 @@ class AgentScopeHitlFlowTest {
         assertThat(initial).as("Initial events: %s; model inputs: %s", initial, model.inputs)
                 .noneMatch(AguiEvent.RunError.class::isInstance);
         assertThat(runtime.find(runId).status()).isEqualTo(AgentRunStatus.AWAITING_CONFIRM);
-        String stageId = workspace.findOpenChapterStage(task.id()).stageId();
+        var stage = workspace.findOpenChapterStage(task.id());
+        String stageId = stage.stageId();
+        assertThat(stage.isReadyForReview()).isTrue();
+        assertThat(stage.isComplete()).isFalse();
+        assertThat(stage.chapterMemory()).isNull();
+        assertThat(stage.documentState()).isNull();
+        assertThat(stage.workingPlan()).isNull();
         assertThat(workspace.listContents(task.id())).isEmpty();
         assertThat(toolCalls(runId)).filteredOn(call -> call.getState() == ToolCallState.ASKING)
                 .extracting(ToolUseBlock::getId).containsExactly("commit-original");
@@ -188,7 +194,14 @@ class AgentScopeHitlFlowTest {
         model.responses.add(() -> new ToolUseBlock("prepare-original", "prepare_candidate",
                 Map.of("text", "第一版正文")));
         model.responses.add(() -> new ToolUseBlock("commit-invalid", "commit_chapter",
-                Map.of("stage_id", "chapter-001-active")));
+                Map.of(
+                        "stage_id", "chapter-001-active",
+                        "chapter_memory", "# 章节记忆\n\n第一版正文",
+                        "document_state", "# 文档状态\n\n第一版正文",
+                        "working_plan", """
+                                {"version":1,"completed":["项目概况"],"nextDirection":"实施安排",
+                                 "remainingDirections":["实施安排"],"adjustmentReason":"用户已通过当前章节"}
+                                """)));
         var initial = runner.run(task.id()).collectList().block(Duration.ofSeconds(20));
         String runId = initial.getFirst().getRunId();
         String sessionId = runtime.find(runId).threadId();
@@ -213,7 +226,13 @@ class AgentScopeHitlFlowTest {
 
     private void enqueueCandidate(String id, String text) {
         model.responses.add(() -> new ToolUseBlock("prepare-" + id, "prepare_candidate", Map.of("text", text)));
-        model.responses.add(() -> new ToolUseBlock("commit-" + id, "commit_chapter", Map.of()));
+        model.responses.add(() -> new ToolUseBlock("commit-" + id, "commit_chapter", Map.of(
+                "chapter_memory", "# 章节记忆\n\n" + text,
+                "document_state", "# 文档状态\n\n" + text,
+                "working_plan", """
+                        {"version":1,"completed":["项目概况"],"nextDirection":"实施安排",
+                         "remainingDirections":["实施安排"],"adjustmentReason":"用户已通过当前章节"}
+                        """)));
     }
 
     private List<Msg> persistedContext(String runId) {
@@ -241,12 +260,6 @@ class AgentScopeHitlFlowTest {
         public String prepare(@ToolParam(name = "text", description = "正文") String text, WritingToolContext context) {
             context.markResearchLocated();
             writingTools.saveContent("项目概况", "正式文风", "## 项目概况\n\n" + text, context);
-            writingTools.saveChapterMemory("# 章节记忆\n\n" + text, context);
-            writingTools.updateDocumentState("# 文档状态\n\n" + text, context);
-            writingTools.updateWorkingPlan("""
-                    {"version":1,"completed":["项目概况"],"nextDirection":"实施安排",
-                     "remainingDirections":["实施安排"],"adjustmentReason":"当前章节已暂存"}
-                    """, context);
             return context.stageId();
         }
     }

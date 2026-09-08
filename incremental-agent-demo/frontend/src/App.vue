@@ -284,11 +284,14 @@ async function refreshPendingReview(id: string): Promise<void> {
     };
     pendingReview.value = nextReview;
     ensureConversation(id).forEach(item => {
-        if (item.kind === "review" && item.rejected && item.review.runId !== nextReview.runId) {
+        if (item.kind === "review" && item.rejected
+            && (item.review.runId !== nextReview.runId || item.review.toolCallId !== nextReview.toolCallId)) {
             item.status = "已按意见废弃，等待新候选审核";
         }
     });
-    const exists = ensureConversation(id).some(item => item.kind === "review" && item.review.runId === nextReview.runId);
+    const exists = ensureConversation(id).some(item => item.kind === "review"
+        && item.review.runId === nextReview.runId
+        && item.review.toolCallId === nextReview.toolCallId);
     if (!exists) {
         appendConversation(id, {
             id: newId(),

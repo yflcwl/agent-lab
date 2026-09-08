@@ -54,7 +54,7 @@ public class WritingWorkflow {
         int sequence = stage == null ? taskView.contents().size() + 1 : stage.content().sequence();
         WritingRunCommand command = stage == null
                 ? WritingRunCommand.writeChapter(message)
-                : stage.isComplete()
+                : stage.isReadyForReview()
                         ? WritingRunCommand.requestChapterCommit(stage.stageId())
                         : WritingRunCommand.recoverStage(stage.stageId());
         return new PreparedRun(taskView.task(), resolveChapterSessionId(taskView.task(), sequence), command,
@@ -63,7 +63,7 @@ public class WritingWorkflow {
 
     public PreparedRun prepareRetry(String taskId, String chapterSessionId) {
         ChapterStage stage = findOpenStage(taskId);
-        if (stage == null || !stage.isComplete()) {
+        if (stage == null || !stage.isReadyForReview()) {
             return null;
         }
         WritingTask task = workspaceService.getTaskView(taskId).task();
@@ -110,7 +110,7 @@ public class WritingWorkflow {
                 "用户未通过第 %d 章「%s」的候选，请在当前章节和 Session 内根据审核意见重写；"
                         .formatted(stage.content().sequence(), stage.content().title())
                         + "旧 Stage " + stage.stageId() + " 已废弃，不得提交旧 Stage 或将其视为已完成内容。"
-                        + "请重新完成正文、章节记忆、滚动状态和临时计划的暂存，再调用 commit_chapter 请求新一轮审核。"
+                        + "请重新暂存正文后调用 commit_chapter 请求新一轮审核。章节记忆、滚动状态和临时计划仅在用户通过审核后写入。"
                         + "\n\n审核意见：\n" + feedback, stage.stageId());
     }
 
@@ -167,8 +167,8 @@ public class WritingWorkflow {
             return new AgentRunCompletion(new ChapterStageCoordinator.ChapterCommit(toolContext.stageId(), committed));
         }
         ChapterStage stage = toolContext.stage();
-        if (stage != null && stage.isComplete()) {
-            throw new IllegalStateException("完整 ChapterStage 尚未请求 commit_chapter 审核");
+        if (stage != null && stage.isReadyForReview()) {
+            throw new IllegalStateException("候选正文尚未请求 commit_chapter 审核");
         }
         return AgentRunCompletion.none();
     }
