@@ -118,8 +118,7 @@ public class WritingWorkflow {
     }
 
     private boolean isCurrentStageReference(ChapterStage stage, Object reference) {
-        return stage.stageId().equals(reference)
-                || (stage.content() != null && stage.content().filename().equals(reference));
+        return stage.stageId().equals(reference);
     }
 
     public Flux<AguiEvent> completeAgentEvents(

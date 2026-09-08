@@ -23,6 +23,9 @@ public final class WritingToolContext {
     }
 
     public WritingToolContext(String taskId, ChapterStage recoveryStage) {
+        if (recoveryStage != null && !taskId.equals(recoveryStage.taskId())) {
+            throw new IllegalArgumentException("ChapterStage 不属于当前写作任务");
+        }
         this.taskId = taskId;
         this.recoveryStage = recoveryStage;
         this.stage = recoveryStage;
@@ -45,7 +48,11 @@ public final class WritingToolContext {
         if (!researchLocated) {
             throw new IllegalStateException("保存正文前必须让资料 Agent 检索相关资料片段");
         }
-        stage = operation.get();
+        ChapterStage createdStage = operation.get();
+        if (createdStage == null || !taskId.equals(createdStage.taskId())) {
+            throw new IllegalStateException("新建 ChapterStage 不属于当前写作任务");
+        }
+        stage = createdStage;
         savedContent = stage.content();
         newlySavedContent = savedContent;
         return savedContent;
@@ -108,14 +115,26 @@ public final class WritingToolContext {
     }
 
     public synchronized String stageId() {
-        if (stage == null) {
-            throw new IllegalStateException("必须先保存本章正文，才能更新 ChapterStage");
-        }
-        return stage.stageId();
+        return requireCurrentStage().stageId();
     }
 
     public synchronized ChapterStage stage() {
         return stage;
+    }
+
+    public synchronized ChapterStage requireCurrentStage() {
+        if (stage == null) {
+            throw new IllegalStateException("当前 Run 尚未绑定 ChapterStage");
+        }
+        return stage;
+    }
+
+    public synchronized ChapterStage requireCurrentStage(String requestedStageId) {
+        ChapterStage current = requireCurrentStage();
+        if (!current.stageId().equals(requestedStageId)) {
+            throw new IllegalArgumentException("当前 Run 只能访问 ChapterStage: " + current.stageId());
+        }
+        return current;
     }
 
     public synchronized void markCommitted(ContentEntry content) {

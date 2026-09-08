@@ -76,7 +76,8 @@ public class WritingTools {
 
     @Tool(name = "read_staged_chapter", description = "读取当前未提交 ChapterStage 的正文和已暂存状态。仅用于故障恢复；它不是已完成章节，不能通过 read_completed_content 读取。", readOnly = true)
     public String readStagedChapter(WritingToolContext context) {
-        return workspaceService.readChapterStage(context.taskId(), context.stageId());
+        return workspaceService.readChapterStage(
+                context.taskId(), context.requireCurrentStage().stageId());
     }
 
     @Tool(name = "list_chapter_memories", description = "列出 memory/chapters/ 下的历史章节记忆文件，不会把所有摘要塞入上下文。由你判断当前章节需要读取哪些。", readOnly = true)
@@ -123,12 +124,8 @@ public class WritingTools {
     public String commitChapter(
             @ToolParam(name = "stage_id", description = "当前完整 ChapterStage 的 stageId") String stageId,
             WritingToolContext context) {
-        if (!context.stageId().equals(stageId)
-                && (context.stage() == null || context.stage().content() == null
-                || !context.stage().content().filename().equals(stageId))) {
-            throw new IllegalArgumentException("只能提交当前 ChapterStage: " + context.stageId());
-        }
-        ChapterStageCoordinator.ChapterCommit commit = chapterStageCoordinator.commitIfComplete(context.taskId(), context.stage());
+        ChapterStageCoordinator.ChapterCommit commit = chapterStageCoordinator.commitIfComplete(
+                context.taskId(), context.requireCurrentStage(stageId));
         context.markCommitted(commit.content());
         return "章节已提交: " + commit.content().filename();
     }

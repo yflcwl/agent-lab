@@ -198,6 +198,31 @@ class IncrementalWritingFlowTest {
     }
 
     @Test
+    void limitsARunToItsCurrentChapterStage() {
+        WritingTask task = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+        WritingTask otherTask = workspaceService.createTask(
+                "user-1", "# 其他参考文档", Map.of("其他资料.md", "其他事实"));
+        WritingToolContext context = new WritingToolContext(task.id());
+        context.markResearchLocated();
+        writingTools.saveContent("项目概况", "正式表达", "## 项目概况\n\n正文", context);
+        var currentStage = workspaceService.findOpenChapterStage(task.id());
+
+        assertThat(writingTools.readStagedChapter(context))
+                .contains(currentStage.stageId(), "项目概况");
+        assertThatThrownBy(() -> new WritingToolContext(otherTask.id(), currentStage))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("不属于当前写作任务");
+        assertThatThrownBy(() -> writingTools.readStagedChapter(new WritingToolContext(task.id())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("尚未绑定 ChapterStage");
+        assertThatThrownBy(() -> writingTools.commitChapter(
+                currentStage.content().filename(), context))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("当前 Run 只能访问 ChapterStage");
+    }
+
+    @Test
     void keepsTheSameChapterSessionWhenAChapterStopsBeforeSaving() {
         WritingTask task = workspaceService.createTask(
                 "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
