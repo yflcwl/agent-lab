@@ -35,7 +35,7 @@ public class PostgresAgentRunRepository implements AgentRunRepository {
                 StringUtils.hasText(userMessage) ? userMessage : "继续", null, AgentMessageStatus.COMPLETED);
         Instant now = Instant.now();
         mapper.insert(new AgentRun(run.runId(), run.correlationId(), agentId, message.id(), AgentRunStatus.CREATED,
-                null, null, null, null, now, now, run.correlationId(), run.threadId(), "[]", 0));
+                null, null, null, null, now, now, run.correlationId(), run.threadId(), "[]", null, 0));
     }
 
     @Override
@@ -48,7 +48,7 @@ public class PostgresAgentRunRepository implements AgentRunRepository {
         Instant now = Instant.now();
         mapper.insert(new AgentRun(run.runId(), failed.conversationId(), agentId, failed.triggerMessageId(),
                 AgentRunStatus.CREATED, null, null, null, null, now, now,
-                run.correlationId(), run.threadId(), "[]", 0));
+                run.correlationId(), run.threadId(), "[]", null, 0));
     }
 
     @Override
@@ -72,7 +72,7 @@ public class PostgresAgentRunRepository implements AgentRunRepository {
     @Override
     @Transactional
     public void transition(AgentRunRecord expected, AgentRunStatus status, List<AgentRunInterrupt> interrupts,
-                           String errorCode, String errorMessage) {
+                           RunCheckpoint checkpoint, String errorCode, String errorMessage) {
         Instant now = Instant.now();
         AgentRun run = mapper.selectById(expected.runId());
         if (run == null || run.lockVersion() != expected.lockVersion()) {
@@ -80,6 +80,7 @@ public class PostgresAgentRunRepository implements AgentRunRepository {
         }
         run.setStatus(status);
         run.setPendingInterruptsJson(json(interrupts));
+        run.setCheckpointJson(checkpoint == null ? null : json(checkpoint));
         run.setErrorCode(errorCode);
         run.setErrorMessage(errorMessage);
         if (run.getStartedAt() == null && status == AgentRunStatus.RUNNING) {
@@ -101,7 +102,9 @@ public class PostgresAgentRunRepository implements AgentRunRepository {
     private AgentRunRecord record(AgentRun run) {
         try {
             List<AgentRunInterrupt> interrupts = json.readValue(run.pendingInterruptsJson(), new TypeReference<>() {});
-            return new AgentRunRecord(run.id(), run.correlationId(), run.threadId(), run.status(), interrupts,
+            RunCheckpoint checkpoint = run.checkpointJson() == null
+                    ? null : json.readValue(run.checkpointJson(), RunCheckpoint.class);
+            return new AgentRunRecord(run.id(), run.correlationId(), run.threadId(), run.status(), interrupts, checkpoint,
                     run.createdAt(), run.updatedAt(), run.lockVersion());
         } catch (java.io.IOException error) {
             throw new IllegalStateException("读取 Run interrupt 失败: " + run.id(), error);

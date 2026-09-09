@@ -4,11 +4,16 @@ import com.example.incremental.agent.ResearchTools;
 import com.example.incremental.runtime.RequireUserConfirmAguiEventConverter;
 import com.example.incremental.agent.WritingTools;
 import com.example.incremental.writing.WritingTask;
+import com.example.incremental.writing.TaskStatus;
 import com.example.incremental.writing.ChapterStageStatus;
 import com.example.incremental.runtime.AgentRunDecision;
 import com.example.incremental.writing.WritingTaskView;
 import com.example.incremental.runtime.AgentRunRuntime;
+import com.example.incremental.runtime.AgentRunStatus;
 import com.example.incremental.runtime.RoundRunner;
+import com.example.incremental.runtime.RunSafePoint;
+import com.example.incremental.runtime.TaskControl;
+import com.example.incremental.runtime.TaskRuntime;
 import com.example.incremental.workspace.TaskWorkspaceService;
 import com.example.incremental.rag.TempRagService;
 import com.example.incremental.rag.TempRagEmbeddingModel;
@@ -54,10 +59,12 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "demo.agent.enabled=false",
@@ -74,6 +81,7 @@ class IncrementalWritingFlowTest {
     private final WritingTools writingTools;
     private final ResearchTools researchTools;
     private final AgentRunRuntime agentRunRuntime;
+    private final TaskRuntime taskRuntime;
     private final PermissionContextState writingPermissionContext;
     private final TempRagService tempRagService;
 
@@ -87,6 +95,7 @@ class IncrementalWritingFlowTest {
             WritingTools writingTools,
             ResearchTools researchTools,
             AgentRunRuntime agentRunRuntime,
+            TaskRuntime taskRuntime,
             PermissionContextState writingPermissionContext,
             TempRagService tempRagService) {
         this.workspaceService = workspaceService;
@@ -94,6 +103,7 @@ class IncrementalWritingFlowTest {
         this.writingTools = writingTools;
         this.researchTools = researchTools;
         this.agentRunRuntime = agentRunRuntime;
+        this.taskRuntime = taskRuntime;
         this.writingPermissionContext = writingPermissionContext;
         this.tempRagService = tempRagService;
     }
@@ -105,6 +115,7 @@ class IncrementalWritingFlowTest {
         StubAgentConfiguration.messages.clear();
         StubAgentConfiguration.interruptNextRun.set(false);
         StubAgentConfiguration.skipCommitNextRun.set(false);
+        StubAgentConfiguration.failNextResume.set(false);
     }
 
     @Test
@@ -147,6 +158,92 @@ class IncrementalWritingFlowTest {
         assertThat(workspaceService.getFullContent(task.id()))
                 .contains("第一轮正文")
                 .contains("第二轮正文");
+    }
+
+    @Test
+    void pausesAtARuntimeSafePointAndResumesTheSameRun() throws Exception {
+        WritingTask task = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+
+        var running = roundRunner.run(task.id(), "trigger-delayed-stream").collectList().toFuture();
+        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
+            TaskControl current = taskRuntime.find(task.id());
+            assertThat(current.activeRunId()).isNotNull();
+            assertThat(agentRunRuntime.find(current.activeRunId()).status()).isEqualTo(AgentRunStatus.RUNNING);
+        });
+        String runId = taskRuntime.find(task.id()).activeRunId();
+
+        TaskControl pauseRequested = taskRuntime.requestPause(task.id());
+        assertThat(pauseRequested.status()).isEqualTo(TaskStatus.PAUSE_REQUESTED);
+
+        var pausedEvents = running.get(3, TimeUnit.SECONDS);
+        assertThat(pausedEvents).anySatisfy(event -> {
+            assertThat(event).isInstanceOf(AguiEvent.Custom.class);
+            assertThat(((AguiEvent.Custom) event).name()).isEqualTo("run.paused");
+        });
+        TaskControl pausedTask = taskRuntime.find(task.id());
+        assertThat(pausedTask.status()).isEqualTo(TaskStatus.PAUSED);
+        assertThat(pausedTask.activeRunId()).isEqualTo(runId);
+        assertThat(agentRunRuntime.find(runId).status()).isEqualTo(AgentRunStatus.PAUSED);
+        assertThat(agentRunRuntime.find(runId).checkpoint().safePoint())
+                .isEqualTo(RunSafePoint.BEFORE_BUSINESS_COMMIT);
+        assertThatThrownBy(() -> roundRunner.run(task.id(), "不能创建新 Run").collectList().block())
+                .hasMessageContaining("不允许创建新的 Run");
+
+        var resumedEvents = roundRunner.resumeTask(task.id()).collectList().block();
+
+        assertThat(resumedEvents).isNotEmpty().allMatch(event -> runId.equals(event.getRunId()));
+        assertThat(agentRunRuntime.find(runId).status()).isEqualTo(AgentRunStatus.FINISHED);
+        assertThat(taskRuntime.find(task.id()).status()).isEqualTo(TaskStatus.RUNNING);
+        assertThat(taskRuntime.find(task.id()).activeRunId()).isNull();
+    }
+
+    @Test
+    void pausesAndRestoresAnAwaitingConfirmationRunWithoutStartingAnotherRun() {
+        WritingTask task = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+        StubAgentConfiguration.interruptNextRun.set(true);
+        String runId = roundRunner.run(task.id()).collectList().block().getFirst().getRunId();
+
+        assertThat(taskRuntime.find(task.id()).status()).isEqualTo(TaskStatus.RUNNING);
+        assertThat(taskRuntime.find(task.id()).activeRunId()).isEqualTo(runId);
+        assertThatThrownBy(() -> roundRunner.run(task.id(), "不能越过审核 Run").collectList().block())
+                .hasMessageContaining("activeRun");
+
+        TaskControl paused = taskRuntime.requestPause(task.id());
+
+        assertThat(paused.status()).isEqualTo(TaskStatus.PAUSED);
+        assertThat(paused.activeRunId()).isEqualTo(runId);
+        assertThat(agentRunRuntime.find(runId).status()).isEqualTo(AgentRunStatus.PAUSED);
+        assertThat(agentRunRuntime.find(runId).checkpoint().safePoint())
+                .isEqualTo(RunSafePoint.WAITING_FOR_CONFIRMATION);
+
+        var events = roundRunner.resumeTask(task.id()).collectList().block();
+
+        assertThat(events).singleElement().satisfies(event -> assertThat(event.getRunId()).isEqualTo(runId));
+        assertThat(agentRunRuntime.find(runId).status()).isEqualTo(AgentRunStatus.AWAITING_CONFIRM);
+        assertThat(taskRuntime.find(task.id()).status()).isEqualTo(TaskStatus.RUNNING);
+        assertThat(taskRuntime.find(task.id()).activeRunId()).isEqualTo(runId);
+    }
+
+    @Test
+    void parentTerminalStatusesBlockNewRuns() {
+        WritingTask completed = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+        WritingTask failed = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+        WritingTask cancelled = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+
+        assertThat(taskRuntime.markCompleted(completed.id()).status()).isEqualTo(TaskStatus.COMPLETED);
+        assertThat(taskRuntime.markFailed(failed.id()).status()).isEqualTo(TaskStatus.FAILED);
+        assertThat(taskRuntime.markCancelled(cancelled.id()).status()).isEqualTo(TaskStatus.CANCELLED);
+        assertThatThrownBy(() -> roundRunner.run(completed.id()).collectList().block())
+                .hasMessageContaining("不允许创建新的 Run");
+        assertThatThrownBy(() -> roundRunner.run(failed.id()).collectList().block())
+                .hasMessageContaining("不允许创建新的 Run");
+        assertThatThrownBy(() -> roundRunner.run(cancelled.id()).collectList().block())
+                .hasMessageContaining("不允许创建新的 Run");
     }
 
     @Test
@@ -223,12 +320,15 @@ class IncrementalWritingFlowTest {
         WritingTask task = workspaceService.createTask(
                 "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
 
-        roundRunner.run(task.id(), "trigger-stream-error").collectList().block();
-        roundRunner.run(task.id(), "继续").collectList().block();
+        var failedEvents = roundRunner.run(task.id(), "trigger-stream-error").collectList().block();
+        String runId = failedEvents.getFirst().getRunId();
+        var recoveredEvents = roundRunner.resumeTask(task.id()).collectList().block();
 
         assertThat(StubAgentConfiguration.sessions).hasSize(2);
         assertThat(StubAgentConfiguration.sessions.get(0))
                 .isEqualTo(StubAgentConfiguration.sessions.get(1));
+        assertThat(recoveredEvents).allMatch(event -> runId.equals(event.getRunId()));
+        assertThat(agentRunRuntime.find(runId).status()).isEqualTo(AgentRunStatus.FINISHED);
         assertThat(workspaceService.listContents(task.id())).hasSize(1);
     }
 
@@ -314,6 +414,31 @@ class IncrementalWritingFlowTest {
     }
 
     @Test
+    void recoversAnAwaitingReviewStageWhenNoActiveRunExists() {
+        WritingTask task = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+        WritingToolContext context = new WritingToolContext(task.id());
+        context.markResearchLocated();
+        writingTools.saveContent("项目概况", "正式表达", "## 项目概况\n\n正文", context);
+        writingTools.saveChapterMemory("# 章节记忆\n\n已完成项目概况。", context);
+        writingTools.updateDocumentState("# 文档当前状态\n\n已完成项目概况。", context);
+        writingTools.updateWorkingPlan("""
+                {"version":1,"completed":["项目概况"],"nextDirection":"实施安排",
+                 "remainingDirections":["实施安排"],"adjustmentReason":"恢复待审 Stage"}
+                """, context);
+        workspaceService.markChapterStageAwaitingReview(task.id(), context.stageId());
+        assertThat(taskRuntime.find(task.id()).activeRunId()).isNull();
+
+        var events = roundRunner.run(task.id(), "继续").collectList().block();
+
+        assertThat(events).extracting(event -> event.getType().name())
+                .containsExactly("RUN_STARTED", "TEXT_MESSAGE_CONTENT", "CUSTOM", "RUN_FINISHED");
+        assertThat(workspaceService.findOpenChapterStage(task.id())).isNull();
+        assertThat(workspaceService.listContents(task.id())).hasSize(1);
+        assertThat(taskRuntime.find(task.id()).activeRunId()).isNull();
+    }
+
+    @Test
     void keepsACompleteStageAwaitingReviewWhenCommitIsInterrupted() {
         WritingTask task = workspaceService.createTask(
                 "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
@@ -364,6 +489,34 @@ class IncrementalWritingFlowTest {
         assertThat(StubAgentConfiguration.sessions).hasSize(2).allMatch(session ->
                 session.equals(StubAgentConfiguration.sessions.getFirst()));
         assertThat(events).allMatch(event -> interruptedRunId.equals(event.getRunId()));
+    }
+
+    @Test
+    void resumesTheSameRunAfterAReviewResumeFails() {
+        WritingTask task = workspaceService.createTask(
+                "user-1", "# 完整参考文档", Map.of("资料.md", "背景事实"));
+        StubAgentConfiguration.interruptNextRun.set(true);
+        String runId = roundRunner.run(task.id()).collectList().block().getFirst().getRunId();
+        StubAgentConfiguration.failNextResume.set(true);
+
+        var failedEvents = roundRunner.resume(task.id(), runId,
+                List.of(new AgentRunDecision("tool-call-1", true))).collectList().block();
+
+        assertThat(failedEvents).anyMatch(AguiEvent.RunError.class::isInstance);
+        assertThat(agentRunRuntime.find(runId).status()).isEqualTo(AgentRunStatus.ERROR);
+        assertThat(taskRuntime.find(task.id()).status()).isEqualTo(TaskStatus.FAILED);
+        assertThat(taskRuntime.find(task.id()).activeRunId()).isEqualTo(runId);
+        assertThat(workspaceService.findOpenChapterStage(task.id()).status())
+                .isEqualTo(ChapterStageStatus.AWAITING_REVIEW);
+
+        var recoveredEvents = roundRunner.resumeTask(task.id()).collectList().block();
+
+        assertThat(recoveredEvents).isNotEmpty().allMatch(event -> runId.equals(event.getRunId()));
+        assertThat(agentRunRuntime.find(runId).status()).isEqualTo(AgentRunStatus.FINISHED);
+        assertThat(taskRuntime.find(task.id()).status()).isEqualTo(TaskStatus.RUNNING);
+        assertThat(taskRuntime.find(task.id()).activeRunId()).isNull();
+        assertThat(workspaceService.findOpenChapterStage(task.id())).isNull();
+        assertThat(workspaceService.listContents(task.id())).hasSize(1);
     }
 
     @Test
@@ -703,6 +856,7 @@ class IncrementalWritingFlowTest {
         static final AtomicInteger calls = new AtomicInteger();
         static final java.util.concurrent.atomic.AtomicBoolean interruptNextRun = new java.util.concurrent.atomic.AtomicBoolean();
         static final java.util.concurrent.atomic.AtomicBoolean skipCommitNextRun = new java.util.concurrent.atomic.AtomicBoolean();
+        static final java.util.concurrent.atomic.AtomicBoolean failNextResume = new java.util.concurrent.atomic.AtomicBoolean();
         static final List<String> sessions = new CopyOnWriteArrayList<>();
         static final List<String> messages = new CopyOnWriteArrayList<>();
 
@@ -823,6 +977,11 @@ class IncrementalWritingFlowTest {
                     return Flux.defer(() -> {
                         sessions.add(chapterSessionId);
                         messages.add(message);
+                        if (failNextResume.compareAndSet(true, false)) {
+                            return Flux.just(new AguiEvent.RunStarted(chapterSessionId, runId),
+                                    new AguiEvent.RunError(chapterSessionId, runId,
+                                            "模拟恢复失败", "STUB_RESUME_ERROR"));
+                        }
                         if (resume.stream().anyMatch(decision -> !decision.isResolved())) {
                             assertThat(context.stage()).isNull();
                             assertThat(resume.getFirst().getPayload()).isInstanceOf(Map.class);

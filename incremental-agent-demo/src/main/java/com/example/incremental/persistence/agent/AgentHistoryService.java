@@ -7,6 +7,7 @@ import com.example.incremental.persistence.agent.mapper.AgentRunEventMapper;
 import com.example.incremental.persistence.agent.mapper.AgentRunMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.incremental.writing.TaskStatus;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -58,7 +59,7 @@ public class AgentHistoryService {
         Instant now = Instant.now();
         AgentConversation conversation = new AgentConversation(
                 conversationId, tenantId, userId, agentId, title,
-                ConversationStatus.ACTIVE, now, now);
+                TaskStatus.RUNNING, null, null, now, now, 0);
         conversationMapper.insert(conversation);
         return conversation;
     }
@@ -186,7 +187,7 @@ public class AgentHistoryService {
         validatePage(offset, limit);
         var query = Wrappers.<AgentConversation>lambdaQuery()
                 .eq(AgentConversation::getUserId, userId)
-                .eq(AgentConversation::getStatus, ConversationStatus.ACTIVE);
+                .isNull(AgentConversation::getDeletedAt);
         if (tenantId == null) {
             query.isNull(AgentConversation::getTenantId);
         } else {

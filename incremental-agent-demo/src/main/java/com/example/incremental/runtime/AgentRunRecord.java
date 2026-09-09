@@ -9,6 +9,7 @@ public record AgentRunRecord(
         String threadId,
         AgentRunStatus status,
         List<AgentRunInterrupt> pendingInterrupts,
+        RunCheckpoint checkpoint,
         Instant createdAt,
         Instant updatedAt,
         long lockVersion) {

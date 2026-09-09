@@ -9,7 +9,10 @@ import com.example.incremental.runtime.AgentRunRuntime;
 import com.example.incremental.rag.DocumentTextExtractor;
 import com.example.incremental.runtime.RoundRunner;
 import com.example.incremental.runtime.AgentRunDecision;
+import com.example.incremental.runtime.TaskControl;
+import com.example.incremental.runtime.TaskRuntime;
 import com.example.incremental.workspace.TaskWorkspaceService;
+import com.example.incremental.writing.WritingTask;
 import com.example.incremental.rag.TempRagService;
 import com.example.incremental.persistence.agent.AgentConversationHistory;
 import com.example.incremental.persistence.agent.AgentMessage;
@@ -46,6 +49,7 @@ public class WritingTaskController {
     private final TaskWorkspaceService workspaceService;
     private final RoundRunner roundRunner;
     private final AgentRunRuntime agentRunRuntime;
+    private final TaskRuntime taskRuntime;
     private final DocumentTextExtractor documentTextExtractor;
     private final TempRagService tempRagService;
 
@@ -53,11 +57,13 @@ public class WritingTaskController {
             TaskWorkspaceService workspaceService,
             RoundRunner roundRunner,
             AgentRunRuntime agentRunRuntime,
+            TaskRuntime taskRuntime,
             DocumentTextExtractor documentTextExtractor,
             TempRagService tempRagService) {
         this.workspaceService = workspaceService;
         this.roundRunner = roundRunner;
         this.agentRunRuntime = agentRunRuntime;
+        this.taskRuntime = taskRuntime;
         this.documentTextExtractor = documentTextExtractor;
         this.tempRagService = tempRagService;
     }
@@ -100,7 +106,7 @@ public class WritingTaskController {
                     return Flux.fromIterable(taskSources.entrySet())
                             .concatMap(source -> tempRagService.addDocument(
                                     task.id(), source.getKey(), source.getKey(), source.getValue()))
-                            .then(Mono.fromCallable(() -> workspaceService.getTaskView(task.id())))
+                            .then(Mono.fromCallable(() -> taskRuntime.getTaskView(task.id())))
                             .onErrorResume(error -> {
                                 tempRagService.delete(task.id());
                                 return Mono.error(error);
@@ -121,7 +127,7 @@ public class WritingTaskController {
                                         .then(Mono.defer(() -> tempRagService.addDocument(
                                                 task.id(), file.filename(), file.filename(), target)));
                             })
-                            .then(Mono.fromCallable(() -> workspaceService.getTaskView(task.id())))
+                            .then(Mono.fromCallable(() -> taskRuntime.getTaskView(task.id())))
                             .onErrorResume(error -> {
                                 tempRagService.delete(task.id());
                                 return Mono.error(error);
@@ -131,7 +137,7 @@ public class WritingTaskController {
 
     @GetMapping
     public List<WritingTaskView> listTasks() {
-        return workspaceService.listTaskViews();
+        return taskRuntime.listTaskViews();
     }
 
     @PostMapping(value = "/{taskId}/rounds", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -164,9 +170,27 @@ public class WritingTaskController {
                         .build());
     }
 
+    @PostMapping("/{taskId}/pause")
+    public TaskControl pauseTask(@PathVariable String taskId) {
+        return taskRuntime.requestPause(taskId);
+    }
+
+    @PostMapping(value = "/{taskId}/resume", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<AguiEvent>> resumeTask(
+            @PathVariable String taskId,
+            ServerHttpResponse response) {
+        response.getHeaders().set("Cache-Control", "no-cache, no-transform");
+        response.getHeaders().set("X-Accel-Buffering", "no");
+        return roundRunner.resumeTask(taskId)
+                .map(event -> ServerSentEvent.<AguiEvent>builder()
+                        .event(event.getType().name())
+                        .data(event)
+                        .build());
+    }
+
     @GetMapping("/{taskId}")
     public WritingTaskView getTask(@PathVariable String taskId) {
-        return workspaceService.getTaskView(taskId);
+        return taskRuntime.getTaskView(taskId);
     }
 
     @GetMapping("/{taskId}/messages")

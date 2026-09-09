@@ -2,8 +2,9 @@
 
 .task-list-item { appearance: none; }
 .upload-card input { display: none; }
+.ordered-process-flow { display: grid; gap: 8px; }
 .process-timeline { display: grid; gap: 8px; margin-top: 8px; }
-.execution-trace { margin-top: 8px; border: 1px solid rgba(120, 160, 205, .22); border-radius: 10px; background: rgba(246, 250, 255, .48); }
+.execution-trace { border: 1px solid rgba(120, 160, 205, .22); border-radius: 10px; background: rgba(246, 250, 255, .48); }
 .execution-trace > summary { display: flex; align-items: center; gap: 10px; padding: 8px 11px; cursor: pointer; color: #6386a8; font: 11px var(--mono); list-style-position: inside; }
 .execution-trace > summary span { margin-left: auto; color: #93a9bf; font-size: 10px; }
 .execution-trace[open] > summary { border-bottom: 1px solid rgba(120, 160, 205, .16); }

@@ -1,4 +1,4 @@
-import type {AguiEvent, ConversationHistory, PendingReviewResponse, WritingTaskView} from "./types";
+import type {AguiEvent, ConversationHistory, PendingReviewResponse, TaskControl, WritingTaskView} from "./types";
 
 async function readError(response: Response): Promise<string> {
     try {
@@ -40,6 +40,10 @@ export async function getHistory(taskId: string): Promise<ConversationHistory> {
 
 export async function createTask(form: FormData): Promise<WritingTaskView> {
     return readJson(await fetch("/api/tasks", {method: "POST", body: form}));
+}
+
+export async function pauseTask(taskId: string): Promise<TaskControl> {
+    return readJson(await fetch(`/api/tasks/${taskId}/pause`, {method: "POST"}));
 }
 
 export async function consumeSse(

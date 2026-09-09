@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import {computed, nextTick, onBeforeUnmount, onMounted, reactive, ref} from "vue";
+import {computed, onBeforeUnmount, onMounted, reactive, ref} from "vue";
 import type {ComponentPublicInstance} from "vue";
-import {consumeSse, createTask, getContent, getHistory, getPendingReview, getTask, listTasks} from "./api";
+import {consumeSse, createTask, getContent, getHistory, getPendingReview, getTask, listTasks, pauseTask} from "./api";
 import {renderMarkdown} from "./markdown";
 import type {
     AguiEvent,
@@ -12,6 +12,10 @@ import type {
     StreamMessage,
     WritingTaskView
 } from "./types";
+
+type OrderedProcessGroup =
+    | {id: string; kind: "execution"; entries: ProcessEntry[]; open: boolean}
+    | {id: string; kind: "output"; entry: ProcessEntry};
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const AUTO_FOLLOW_DISTANCE = 72;
@@ -35,7 +39,7 @@ const taskView = ref<WritingTaskView | null>(null);
 const pendingReview = ref<PendingReview | null>(null);
 const running = ref(false);
 const runningTaskId = ref<string | null>(null);
-const stopping = ref(false);
+const pausing = ref(false);
 const createBusy = ref(false);
 const rawContent = ref("");
 const artifactHtml = ref("");
@@ -57,7 +61,6 @@ const targetElements = new Map<string, HTMLElement>();
 const activeIndex = ref(0);
 const hoveredIndex = ref<number | null>(null);
 const hoveredTop = ref(0);
-let abortController: AbortController | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let followsOutput = true;
 let scrollAnimationFrame: number | null = null;
@@ -87,22 +90,48 @@ const contentCount = computed(() => taskView.value?.contents.length || 0);
 const runnable = computed(() => Boolean(taskView.value?.sources.length));
 const viewingBackgroundTask = computed(() => running.value && taskId.value !== runningTaskId.value);
 const awaitingReview = computed(() => pendingReview.value?.taskId === taskId.value);
-const canSend = computed(() => runnable.value && !viewingBackgroundTask.value && !stopping.value && (!awaitingReview.value || running.value));
+const taskStatus = computed(() => taskView.value?.status || "RUNNING");
+const taskPaused = computed(() => taskStatus.value === "PAUSED");
+const taskFailed = computed(() => taskStatus.value === "FAILED");
+const taskCanResume = computed(() => taskPaused.value
+    || (taskFailed.value && Boolean(taskView.value?.activeRunId)));
+const taskTerminal = computed(() => ["COMPLETED", "CANCELLED"].includes(taskStatus.value)
+    || (taskFailed.value && !taskView.value?.activeRunId));
+const currentTaskRunning = computed(() => running.value && taskId.value === runningTaskId.value);
+const canSend = computed(() => runnable.value && !running.value && !awaitingReview.value
+    && taskStatus.value === "RUNNING" && !taskView.value?.activeRunId);
+const canUseComposerButton = computed(() => currentTaskRunning.value
+    ? !pausing.value : (taskCanResume.value && !running.value) || canSend.value);
 const sessionStatus = computed(() => {
-    if (running.value && taskId.value === runningTaskId.value) return "本轮生成中";
+    if (taskStatus.value === "PAUSE_REQUESTED") return "正在等待安全暂停点";
+    if (taskStatus.value === "PAUSED") return "任务已暂停";
+    if (taskStatus.value === "RESUMING") return "正在恢复当前执行";
+    if (taskStatus.value === "COMPLETED") return "任务已完成";
+    if (taskFailed.value) return taskView.value?.activeRunId ? "执行失败，等待恢复" : "任务执行失败";
+    if (taskStatus.value === "CANCELLED") return "任务已取消";
+    if (currentTaskRunning.value) return "本轮生成中";
     if (awaitingReview.value) return "等待章节审核";
     return runnable.value ? "上下文已就绪" : "缺少背景资料";
 });
-const sessionStatusClass = computed(() => running.value && taskId.value === runningTaskId.value
-    ? "running" : awaitingReview.value || !runnable.value ? "warning" : "ready");
+const sessionStatusClass = computed(() => currentTaskRunning.value || taskStatus.value === "RESUMING"
+    ? "running" : awaitingReview.value || !runnable.value || taskStatus.value !== "RUNNING" ? "warning" : "ready");
 const composerPlaceholder = computed(() => {
     if (viewingBackgroundTask.value) return "另一项任务正在生成，当前任务暂时只能查看";
     if (!runnable.value) return "请先在左侧创建写作任务";
+    if (taskPaused.value) return "任务已暂停，点击右侧按钮恢复当前执行";
+    if (taskFailed.value && taskView.value?.activeRunId) return "当前 Run 执行失败，点击右侧按钮从现有状态恢复";
+    if (taskStatus.value === "PAUSE_REQUESTED") return "当前调用完成后会在安全点暂停";
+    if (taskTerminal.value) return taskStatus.value === "COMPLETED" ? "任务已完成"
+        : taskStatus.value === "FAILED" ? "任务执行失败" : "任务已取消";
     if (awaitingReview.value) return "当前章节等待审核通过";
     return contentCount.value === 0 ? "输入消息，例如：开始写第一章" : "输入对上一章的建议，或发送“继续”";
 });
 const composerHint = computed(() => {
     if (viewingBackgroundTask.value) return "正在后台生成另一项任务；本轮结束后会自动返回";
+    if (taskPaused.value) return "恢复后将继续当前 Run，不会创建下一章 Run";
+    if (taskFailed.value && taskView.value?.activeRunId) return "恢复后继续同一个 Run，并复用当前 Agent Session 和 ChapterStage";
+    if (taskStatus.value === "PAUSE_REQUESTED") return "暂停请求已发送，正在等待 Runtime 安全边界";
+    if (taskTerminal.value) return "当前父任务已进入终态";
     if (running.value) return "正在执行当前请求";
     if (!runnable.value) return "请先创建或选择一个可运行的对话任务";
     if (awaitingReview.value) return "候选章节尚未提交，请在上方审核卡中确认";
@@ -163,6 +192,18 @@ function formatTaskDate(value: string | number): string {
     return Number.isNaN(date.getTime())
         ? "未知时间"
         : new Intl.DateTimeFormat("zh-CN", {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"}).format(date);
+}
+
+function taskStateLabel(status: WritingTaskView["status"]): string {
+    return {
+        RUNNING: "",
+        PAUSE_REQUESTED: " · 暂停中",
+        PAUSED: " · 已暂停",
+        RESUMING: " · 恢复中",
+        COMPLETED: " · 已完成",
+        FAILED: " · 已失败",
+        CANCELLED: " · 已取消"
+    }[status];
 }
 
 function formatTime(value?: string): string {
@@ -527,12 +568,47 @@ function finishTimeline(message: StreamMessage): void {
     });
 }
 
-function executionEntries(message: StreamMessage): ProcessEntry[] {
-    return message.process.filter(entry => entry.kind !== "model-text" && entry.kind !== "final-output");
+function orderedProcessEntries(message: StreamMessage): ProcessEntry[] {
+    const finalOutput = [...message.process].reverse().find(entry => entry.kind === "final-output");
+    const finalText = finalOutput?.content?.trim() || "";
+    return message.process.filter(entry => {
+        if (entry.kind === "final-output") return entry === finalOutput;
+        if (entry.kind !== "model-text" || !finalText) return true;
+        const modelText = entry.content?.trim() || "";
+        return modelText !== finalText
+            && !(modelText.length > 200 && (modelText.includes(finalText) || finalText.includes(modelText)));
+    });
+}
+
+function orderedProcessGroups(message: StreamMessage): OrderedProcessGroup[] {
+    const groups: OrderedProcessGroup[] = [];
+    let executionEntries: ProcessEntry[] = [];
+    const flushExecution = () => {
+        if (!executionEntries.length) return;
+        groups.push({
+            id: `execution-${executionEntries[0].id}`,
+            kind: "execution",
+            entries: executionEntries,
+            open: false
+        });
+        executionEntries = [];
+    };
+    for (const entry of orderedProcessEntries(message)) {
+        if (entry.kind === "model-text" || entry.kind === "final-output") {
+            flushExecution();
+            groups.push({id: `output-${entry.id}`, kind: "output", entry});
+        } else {
+            executionEntries.push(entry);
+        }
+    }
+    flushExecution();
+    const current = groups.at(-1);
+    if (current?.kind === "execution") current.open = message.streaming;
+    return groups;
 }
 
 function modelOutput(message: StreamMessage): string {
-    return message.process
+    return orderedProcessEntries(message)
         .filter(entry => entry.kind === "model-text" || entry.kind === "final-output")
         .map(entry => entry.content || "")
         .join("");
@@ -569,6 +645,11 @@ function extractJsonStringField(value: string, field: string): string {
 }
 
 function recordProcessEvent(event: AguiEvent, message: StreamMessage): void {
+    if (event.type === "REASONING_MESSAGE_END" || event.type === "THINKING_BLOCK_END") {
+        const thinking = [...message.process].reverse().find(entry => entry.kind === "thinking" && entry.open);
+        if (thinking) thinking.open = false;
+        return;
+    }
     if (HIDDEN_EVENT_TYPES.has(event.type)) return;
     const position = eventPosition(event, message);
     if (event.type === "RUN_STARTED") {
@@ -594,12 +675,15 @@ function recordProcessEvent(event: AguiEvent, message: StreamMessage): void {
     if (event.textDelta) {
         const previous = message.process.at(-1);
         if (previous?.kind === "model-text") previous.content = `${previous.content || ""}${stringValue(event.textDelta)}`;
-        else addProcessEntry(message, {
-            ...position,
-            kind: "model-text",
-            label: event.type === "CUSTOM" ? "子 Agent 输出" : "模型输出",
-            content: stringValue(event.textDelta)
-        });
+        else {
+            closeRunningSteps(message);
+            addProcessEntry(message, {
+                ...position,
+                kind: "model-text",
+                label: event.type === "CUSTOM" ? "子 Agent 输出" : "模型输出",
+                content: stringValue(event.textDelta)
+            });
+        }
         return;
     }
     if (event.thinkingDelta) {
@@ -628,7 +712,7 @@ function recordProcessEvent(event: AguiEvent, message: StreamMessage): void {
             kind: /FAIL|ERROR|DENIED/i.test(detail) ? "error" : "tool-result",
             label: `${eventLabel(event.type)} · ${name} · ${callId}`,
             content: detail,
-            open: true
+            open: false
             });
         }
         if (message.toolCalls[callId]?.argumentEntry) message.toolCalls[callId].argumentEntry.open = false;
@@ -735,7 +819,13 @@ function recordProcessEvent(event: AguiEvent, message: StreamMessage): void {
 function handleStreamEvent(event: AguiEvent, message: StreamMessage, id: string): void {
     const uiEvent = normalizeEvent(event);
     recordProcessEvent(uiEvent, message);
-    if (uiEvent.type === "RUN_ERROR") message.failed = true;
+    if (uiEvent.type === "RUN_ERROR") {
+        message.failed = true;
+        message.streaming = false;
+    }
+    if (uiEvent.type === "CUSTOM" && uiEvent.name === "run.paused") {
+        message.streaming = false;
+    }
     const savedContent = uiEvent.type === "CUSTOM" && uiEvent.name === "chapter.saved"
         ? ((uiEvent.value || {}) as {content?: {filename?: string; title?: string}}).content
         : undefined;
@@ -753,6 +843,7 @@ function handleStreamEvent(event: AguiEvent, message: StreamMessage, id: string)
         }
     }
     if (uiEvent.type === "RUN_FINISHED") {
+        message.streaming = false;
         finishTimeline(message);
         const outcome = uiEvent.outcome as {interrupts?: Array<{metadata?: {toolName?: string}}>} | undefined;
         if (outcome?.interrupts?.some(interrupt => interrupt.metadata?.toolName === "commit_chapter")) {
@@ -762,14 +853,13 @@ function handleStreamEvent(event: AguiEvent, message: StreamMessage, id: string)
     scrollToLatest();
 }
 
-async function renderStreamUpdate(): Promise<void> {
-    await nextTick();
-    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-}
-
 async function runRound(messageOverride?: string): Promise<void> {
-    if (!taskId.value || running.value || awaitingReview.value) {
+    if (!taskId.value || running.value || awaitingReview.value
+        || taskStatus.value !== "RUNNING" || taskView.value?.activeRunId) {
         if (awaitingReview.value) showToast("请先审核当前章节，再开始下一轮", true);
+        else if (taskStatus.value !== "RUNNING" || taskView.value?.activeRunId) {
+            showToast("当前父任务不允许创建新的 Run", true);
+        }
         return;
     }
     const id = taskId.value;
@@ -784,49 +874,113 @@ async function runRound(messageOverride?: string): Promise<void> {
     scrollToLatest(true);
     running.value = true;
     runningTaskId.value = id;
-    stopping.value = false;
-    abortController = new AbortController();
+    pausing.value = false;
 
     try {
         const response = await fetch(`/api/tasks/${id}/rounds`, {
             method: "POST",
             headers: {"Accept": "text/event-stream", "Content-Type": "application/json"},
-            body: JSON.stringify({message}),
-            signal: abortController.signal
+            body: JSON.stringify({message})
         });
-        await consumeSse(response, async event => {
+        await consumeSse(response, event => {
             handleStreamEvent(event, stream, id);
-            await renderStreamUpdate();
         });
         await refreshTaskList();
         if (taskId.value === id) await refreshArtifact(id);
     } catch (error) {
-        const stopped = stopping.value || (error as DOMException).name === "AbortError";
-        if (!stopped) {
-            stream.failed = true;
-            addProcessEntry(stream, {
-                ...eventPosition({type: "CLIENT_ERROR"}, stream),
-                kind: "error",
-                label: "CLIENT_ERROR",
-                content: (error as Error).message,
-                open: true
-            });
-        }
-        showToast(stopped ? "已停止当前生成" : (error as Error).message, !stopped);
+        stream.failed = true;
+        addProcessEntry(stream, {
+            ...eventPosition({type: "CLIENT_ERROR"}, stream),
+            kind: "error",
+            label: "CLIENT_ERROR",
+            content: (error as Error).message,
+            open: true
+        });
+        showToast((error as Error).message, true);
     } finally {
         stream.streaming = false;
         running.value = false;
         runningTaskId.value = null;
-        stopping.value = false;
-        abortController = null;
+        pausing.value = false;
         if (taskId.value === id) scrollToLatest();
     }
 }
 
-function stopRound(): void {
-    if (!running.value || !abortController || stopping.value) return;
-    stopping.value = true;
-    abortController.abort();
+async function requestTaskPause(): Promise<void> {
+    if (!taskId.value || !currentTaskRunning.value || pausing.value) return;
+    const id = taskId.value;
+    pausing.value = true;
+    try {
+        const control = await pauseTask(id);
+        if (taskView.value?.task.id === id) {
+            taskView.value.status = control.status;
+            taskView.value.activeRunId = control.activeRunId;
+            taskView.value.updatedAt = control.updatedAt;
+        }
+        const listed = tasks.value.find(view => view.task.id === id);
+        if (listed) {
+            listed.status = control.status;
+            listed.activeRunId = control.activeRunId;
+            listed.updatedAt = control.updatedAt;
+        }
+        showToast(control.status === "PAUSED" ? "任务已暂停" : "暂停请求已发送，将在安全点暂停");
+    } catch (error) {
+        pausing.value = false;
+        showToast((error as Error).message, true);
+    }
+}
+
+async function resumePausedTask(): Promise<void> {
+    if (!taskId.value || running.value || !taskCanResume.value) return;
+    const id = taskId.value;
+    const recoveringFailure = taskFailed.value;
+    const stream = reactive(createStreamMessage()) as StreamMessage;
+    appendConversation(id, stream);
+    scrollToLatest(true);
+    running.value = true;
+    runningTaskId.value = id;
+    pausing.value = false;
+    try {
+        const response = await fetch(`/api/tasks/${id}/resume`, {
+            method: "POST",
+            headers: {"Accept": "text/event-stream"}
+        });
+        await consumeSse(response, event => {
+            handleStreamEvent(event, stream, id);
+        });
+        await refreshTaskList();
+        if (taskId.value === id) {
+            await refreshArtifact(id);
+            await refreshPendingReview(id);
+        }
+        showToast(recoveringFailure ? "失败的执行已恢复" : "任务已恢复");
+    } catch (error) {
+        stream.failed = true;
+        addProcessEntry(stream, {
+            ...eventPosition({type: "CLIENT_ERROR"}, stream),
+            kind: "error",
+            label: "CLIENT_ERROR",
+            content: (error as Error).message,
+            open: true
+        });
+        showToast((error as Error).message, true);
+    } finally {
+        stream.streaming = false;
+        running.value = false;
+        runningTaskId.value = null;
+        pausing.value = false;
+        if (taskId.value === id) scrollToLatest();
+    }
+}
+
+function handleComposerAction(): void {
+    if (currentTaskRunning.value) {
+        void requestTaskPause();
+    } else if (taskCanResume.value) {
+        void resumePausedTask();
+    } else {
+        void runRound();
+    }
 }
 
 async function approveReview(item: ReviewMessage): Promise<void> {
@@ -839,7 +993,8 @@ async function rewriteReview(item: ReviewMessage): Promise<void> {
 
 async function resumeReview(item: ReviewMessage, approved: boolean): Promise<void> {
     const review = item.review;
-    if (running.value || taskId.value !== review.taskId || pendingReview.value?.runId !== review.runId) return;
+    if (running.value || taskStatus.value !== "RUNNING" || taskId.value !== review.taskId
+        || pendingReview.value?.runId !== review.runId) return;
     const feedback = item.feedback?.trim() || "";
     if (!approved && !feedback) {
         showToast("请先填写具体的修改意见", true);
@@ -860,45 +1015,36 @@ async function resumeReview(item: ReviewMessage, approved: boolean): Promise<voi
     item.status = approved ? "正在提交…" : "正在根据意见重写…";
     running.value = true;
     runningTaskId.value = review.taskId;
-    stopping.value = false;
-    abortController = new AbortController();
+    pausing.value = false;
     try {
         const response = await fetch(`/api/tasks/${review.taskId}/rounds/${review.runId}/resume`, {
             method: "POST",
             headers: {"Accept": "text/event-stream", "Content-Type": "application/json"},
-            body: JSON.stringify({decisions: [{toolCallId: review.toolCallId, approved, feedback}]}),
-            signal: abortController.signal
+            body: JSON.stringify({decisions: [{toolCallId: review.toolCallId, approved, feedback}]})
         });
-        await consumeSse(response, async event => {
+        await consumeSse(response, event => {
             handleStreamEvent(event, stream, review.taskId);
-            await renderStreamUpdate();
         });
         if (!approved && stream.failed) item.status = "重写失败，请在下方发送新的修改意见";
         await refreshTaskList();
         if (taskId.value === review.taskId) await refreshArtifact(review.taskId);
         await refreshPendingReview(review.taskId);
     } catch (error) {
-        const stopped = stopping.value || (error as DOMException).name === "AbortError";
-        item.status = stopped
-            ? (approved ? "提交已停止" : "重写已停止，请在下方发送新的修改意见")
-            : (approved ? "提交失败，请重试" : "重写请求失败，请在下方发送新的修改意见");
-        if (!stopped) {
-            stream.failed = true;
-            addProcessEntry(stream, {
-                ...eventPosition({type: "CLIENT_ERROR"}, stream),
-                kind: "error",
-                label: "CLIENT_ERROR",
-                content: (error as Error).message,
-                open: true
-            });
-        }
-        showToast(stopped ? (approved ? "已停止提交" : "已停止重写") : (error as Error).message, !stopped);
+        item.status = approved ? "提交失败，请重试" : "重写请求失败，请在下方发送新的修改意见";
+        stream.failed = true;
+        addProcessEntry(stream, {
+            ...eventPosition({type: "CLIENT_ERROR"}, stream),
+            kind: "error",
+            label: "CLIENT_ERROR",
+            content: (error as Error).message,
+            open: true
+        });
+        showToast((error as Error).message, true);
     } finally {
         stream.streaming = false;
         running.value = false;
         runningTaskId.value = null;
-        stopping.value = false;
-        abortController = null;
+        pausing.value = false;
     }
 }
 
@@ -942,7 +1088,7 @@ onMounted(async () => {
                             :disabled="createBusy" @click="selectTask(item.task.id)">
                         <span class="task-list-title">{{ item.contents.at(-1)?.title || `写作任务 · ${item.task.id.slice(0, 8)}` }}</span>
                         <span class="task-list-time">{{ formatTaskDate(item.task.createdAt) }}</span>
-                        <span class="task-list-meta">{{ item.sources.length }} 份资料 · {{ item.contents.length }} 章成果{{ item.task.id === runningTaskId ? " · 生成中" : "" }}{{ item.sources.length ? "" : " · 不可运行" }}</span>
+                        <span class="task-list-meta">{{ item.sources.length }} 份资料 · {{ item.contents.length }} 章成果{{ item.task.id === runningTaskId ? " · 生成中" : taskStateLabel(item.status) }}{{ item.sources.length ? "" : " · 不可运行" }}</span>
                     </button>
                 </div>
             </section>
@@ -999,27 +1145,33 @@ onMounted(async () => {
                         <div class="avatar agent-avatar">B</div>
                         <div class="message-body">
                             <div class="message-meta"><strong>Blueforge</strong><span>{{ item.streaming ? '正在生成' : '模型输出' }}</span></div>
-                            <details v-if="executionEntries(item).length" class="execution-trace" :open="item.streaming">
-                                <summary>执行过程 · {{ executionEntries(item).length }} 项<span>{{ item.streaming ? '正在接收' : '已完成，点击展开' }}</span></summary>
-                                <div class="process-timeline">
-                                <template v-for="entry in executionEntries(item)" :key="entry.id">
-                                    <div v-if="entry.kind === 'status'" :class="['process-entry', 'timeline-status', {running: entry.running}]">
-                                        <span>{{ entry.label }}</span><span>#{{ entry.sequence }} · {{ entry.meta }}</span>
-                                    </div>
-                                    <details v-else :class="['timeline-detail', 'process-entry', entry.kind]" :open="entry.open">
-                                        <summary><span>{{ entry.label }}</span><span class="timeline-detail-time">#{{ entry.sequence }} · {{ entry.meta }}</span></summary>
-                                        <div class="timeline-detail-content">{{ entry.content }}</div>
+                            <div v-if="item.process.length" class="ordered-process-flow">
+                                <template v-for="group in orderedProcessGroups(item)" :key="group.id">
+                                    <div v-if="group.kind === 'output'"
+                                         :class="['message-copy', 'assistant-output', group.entry.kind]"
+                                         v-html="renderMarkdown(group.entry.content || '')"></div>
+                                    <details v-else class="execution-trace" :open="group.open">
+                                        <summary>执行过程 · {{ group.entries.length }} 项<span>{{ group.open ? '正在执行' : '已完成，点击展开' }}</span></summary>
+                                        <div class="process-timeline">
+                                            <template v-for="entry in group.entries" :key="entry.id">
+                                                <div v-if="entry.kind === 'status'" :class="['process-entry', 'timeline-status', {running: entry.running}]">
+                                                    <span>{{ entry.label }}</span><span>#{{ entry.sequence }} · {{ entry.meta }}</span>
+                                                </div>
+                                                <details v-else :class="['timeline-detail', 'process-entry', entry.kind]" :open="entry.open">
+                                                    <summary><span>{{ entry.label }}</span><span class="timeline-detail-time">#{{ entry.sequence }} · {{ entry.meta }}</span></summary>
+                                                    <div class="timeline-detail-content">{{ entry.content }}</div>
+                                                </details>
+                                            </template>
+                                        </div>
                                     </details>
                                 </template>
-                                </div>
-                            </details>
-                            <div v-if="modelOutput(item)" class="message-copy assistant-output" v-html="renderMarkdown(modelOutput(item))"></div>
+                            </div>
                         </div>
                     </article>
-                    <article v-else :ref="element => captureTarget(item.id, element)" :class="['chapter-review-card', {approved: item.approved}]"><div class="review-card-marker">01</div><div class="review-card-body"><div class="review-card-eyebrow">CHAPTER GATE · HUMAN REVIEW</div><strong>{{ item.review.title || '本章候选内容' }}</strong><p>请审阅本章候选正文。通过后，正文及关联的章节记忆、文档状态和临时计划才会一起进入正式成果区。</p><details class="review-card-preview" open><summary><span>候选正文预览</span><span>{{ item.approved ? '已提交' : '尚未提交' }}</span></summary><div class="review-card-preview-content" v-html="renderMarkdown(item.review.markdown)"></div></details><label v-if="!item.approved && !item.rejected" class="review-feedback"><span>修改意见（不会提交当前候选）</span><textarea v-model="item.feedback" rows="3" maxlength="4000" :disabled="running" placeholder="例如：补充实施依据，删去没有资料支撑的表述，并调整第二节的论证顺序。"></textarea></label><div class="review-card-footer"><span class="review-card-status">{{ item.status }}</span><div v-if="!item.approved && !item.rejected" class="review-actions"><button type="button" class="review-rewrite-button" :disabled="running || !item.feedback?.trim()" @click="rewriteReview(item)">{{ item.status === '正在根据意见重写…' ? '正在重写…' : '按意见重写' }}</button><button type="button" :disabled="running" @click="approveReview(item)">{{ item.status === '正在提交…' ? '正在提交…' : '通过并提交' }}</button></div></div></div></article>
+                    <article v-else :ref="element => captureTarget(item.id, element)" :class="['chapter-review-card', {approved: item.approved}]"><div class="review-card-marker">01</div><div class="review-card-body"><div class="review-card-eyebrow">CHAPTER GATE · HUMAN REVIEW</div><strong>{{ item.review.title || '本章候选内容' }}</strong><p>请审阅本章候选正文。通过后，正文及关联的章节记忆、文档状态和临时计划才会一起进入正式成果区。</p><details class="review-card-preview" open><summary><span>候选正文预览</span><span>{{ item.approved ? '已提交' : '尚未提交' }}</span></summary><div class="review-card-preview-content" v-html="renderMarkdown(item.review.markdown)"></div></details><label v-if="!item.approved && !item.rejected" class="review-feedback"><span>修改意见（不会提交当前候选）</span><textarea v-model="item.feedback" rows="3" maxlength="4000" :disabled="running || taskStatus !== 'RUNNING'" placeholder="例如：补充实施依据，删去没有资料支撑的表述，并调整第二节的论证顺序。"></textarea></label><div class="review-card-footer"><span class="review-card-status">{{ item.status }}</span><div v-if="!item.approved && !item.rejected" class="review-actions"><button type="button" class="review-rewrite-button" :disabled="running || taskStatus !== 'RUNNING' || !item.feedback?.trim()" @click="rewriteReview(item)">{{ item.status === '正在根据意见重写…' ? '正在重写…' : '按意见重写' }}</button><button type="button" :disabled="running || taskStatus !== 'RUNNING'" @click="approveReview(item)">{{ item.status === '正在提交…' ? '正在提交…' : '通过并提交' }}</button></div></div></div></article>
                 </template>
             </div>
-            <div class="composer-wrap"><div :class="['composer', {running: running && taskId === runningTaskId}]"><textarea v-model="messageInput" rows="1" maxlength="4000" :disabled="!canSend" :placeholder="composerPlaceholder" aria-label="发送给写作 Agent 的消息" @keydown.enter.exact.prevent="runRound()"></textarea><button type="button" :class="{'stop-mode': running && taskId === runningTaskId}" :disabled="!canSend" :aria-label="running && taskId === runningTaskId ? '停止当前生成' : '发送消息'" @click="running && taskId === runningTaskId ? stopRound() : runRound()"><svg class="send-icon" viewBox="0 0 24 24"><path d="M5 12h13M13 6l6 6-6 6"></path></svg><span class="stop-icon"></span></button></div><p :class="['composer-footnote', {reviewing: awaitingReview}]">{{ composerHint }}</p></div>
+            <div class="composer-wrap"><div :class="['composer', {running: currentTaskRunning}]"><textarea v-model="messageInput" rows="1" maxlength="4000" :disabled="!canSend" :placeholder="composerPlaceholder" aria-label="发送给写作 Agent 的消息" @keydown.enter.exact.prevent="runRound()"></textarea><button type="button" :class="{'stop-mode': currentTaskRunning}" :disabled="!canUseComposerButton" :aria-label="currentTaskRunning ? '请求暂停当前执行' : taskCanResume ? '恢复当前执行' : '发送消息'" @click="handleComposerAction"><svg class="send-icon" viewBox="0 0 24 24"><path d="M5 12h13M13 6l6 6-6 6"></path></svg><span class="stop-icon"></span></button></div><p :class="['composer-footnote', {reviewing: awaitingReview}]">{{ composerHint }}</p></div>
         </main>
 
         <aside :class="['artifact-pane', {collapsed: rightCollapsed}]"><button class="panel-toggle right-toggle" type="button" :aria-label="rightCollapsed ? '展开成果栏' : '折叠成果栏'" @click="rightCollapsed = !rightCollapsed"><span>{{ rightCollapsed ? '‹' : '›' }}</span><b v-if="!rightCollapsed">成果</b></button><template v-if="!rightCollapsed"><header class="artifact-header"><div><div class="eyebrow">ACCEPTED OUTPUT</div><h2>生成正文</h2></div><div class="artifact-actions"><span class="content-count">{{ contentCount }} 章</span><button class="icon-button" type="button" title="复制全部正文" :disabled="!rawContent" @click="copyContent"><svg viewBox="0 0 20 20"><rect x="6" y="6" width="9" height="10" rx="2"></rect><path d="M4 13H3.5A1.5 1.5 0 0 1 2 11.5v-8A1.5 1.5 0 0 1 3.5 2h8A1.5 1.5 0 0 1 13 3.5V4"></path></svg></button></div></header><div class="artifact-scroll"><div v-if="!artifactHtml" class="artifact-empty"><div class="empty-orbit"><span></span><span></span><span></span></div><h3>成果将在这里生长</h3><p>Agent 每完成并保存一章合格内容，它就会追加到这份文档中。</p></div><article v-else class="document"><section class="generated-block" v-html="artifactHtml"></section></article></div><footer class="artifact-footer"><span>{{ rawContent ? "正文已同步" : "等待第一章" }}</span><span class="live-indicator"><i></i> 自动同步</span></footer></template><div class="panel-resizer right-resizer" role="separator" aria-label="调整成果栏宽度" @pointerdown="startResize('right', $event)"></div></aside>

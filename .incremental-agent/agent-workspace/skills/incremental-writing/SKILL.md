@@ -7,8 +7,8 @@ description: 处理增量式长文写作任务时，按章节独立上下文、�
 
 ## 1. 工作边界
 - 一轮只处理一个当前章节
-- 同章节追问、失败恢复时如何继承上下文
-- 跨章节只能读取哪些持久化信息
+- 同章节追问、失败恢复时都是使用同一上下文
+- 跨章节只能读取memory/chapters、document-summary.md、持久化信息
 
 ## 2. 本轮类型识别
 - 新章节写作
@@ -34,10 +34,10 @@ description: 处理增量式长文写作任务时，按章节独立上下文、�
 - 不得覆盖已提交正文的规则
 
 ## 6. 状态更新与审核
-- save_chapter_memory、update_document_state、update_working_plan 的顺序
 - 生成完整 ChapterStage 后请求审核
 - 审核通过时只提交当前 stage_id
 - 审核拒绝或补充时如何继续当前章节
+- 审核通过执行save_chapter_memory、update_document_state、update_working_plan 的顺序，保存进度
 
 ## 7. 失败恢复与结束
 - 哪些状态可以恢复

@@ -7,7 +7,8 @@ public record WritingRunCommand(Type type, String userMessage, String stageId) {
     public enum Type {
         WRITE_CHAPTER,
         RECOVER_STAGE,
-        REQUEST_CHAPTER_COMMIT
+        REQUEST_CHAPTER_COMMIT,
+        RESUME_PAUSED
     }
 
     public static WritingRunCommand writeChapter(String userMessage) {
@@ -27,6 +28,10 @@ public record WritingRunCommand(Type type, String userMessage, String stageId) {
             throw new IllegalArgumentException("stageId 不能为空");
         }
         return new WritingRunCommand(Type.REQUEST_CHAPTER_COMMIT, "", stageId);
+    }
+
+    public static WritingRunCommand resumePaused() {
+        return new WritingRunCommand(Type.RESUME_PAUSED, "", null);
     }
 }
 

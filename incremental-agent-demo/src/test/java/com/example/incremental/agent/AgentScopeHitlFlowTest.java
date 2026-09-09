@@ -8,7 +8,9 @@ import com.example.incremental.runtime.AgentRunRuntime;
 import com.example.incremental.runtime.AgentRunStatus;
 import com.example.incremental.runtime.AgentRunEventRecorder;
 import com.example.incremental.runtime.InMemoryAgentRunRepository;
+import com.example.incremental.runtime.InMemoryTaskControlRepository;
 import com.example.incremental.runtime.RoundRunner;
+import com.example.incremental.runtime.TaskRuntime;
 import com.example.incremental.workspace.TaskWorkspaceService;
 import com.example.incremental.writing.ChapterStageCoordinator;
 import com.example.incremental.writing.ChapterStageStatus;
@@ -96,7 +98,8 @@ class AgentScopeHitlFlowTest {
         runtime = new AgentRunRuntime(new InMemoryAgentRunRepository(), new AgentRunEventRecorder(mapper,
                 new DefaultListableBeanFactory().getBeanProvider(AgentHistoryService.class)));
         runner = new RoundRunner(new WritingWorkflow(workspace, coordinator, properties), runtime,
-                new AgentExecutor(new AgentScopeWritingAgent(harness, Duration.ofSeconds(15), permissions)));
+                new AgentExecutor(new AgentScopeWritingAgent(harness, Duration.ofSeconds(15), permissions)),
+                new TaskRuntime(workspace, new InMemoryTaskControlRepository(), runtime));
         task = workspace.createTask("hitl-user", "# 参考文档", Map.of("资料.md", "项目背景资料"));
     }
 
@@ -190,7 +193,7 @@ class AgentScopeHitlFlowTest {
     }
 
     @Test
-    void legacyStageArgumentCannotRedirectCommitAwayFromTheRunBoundStage() throws Exception {
+    void providedLegacyStageArgumentMustMatchRunBoundStage() throws Exception {
         model.responses.add(() -> new ToolUseBlock("prepare-original", "prepare_candidate",
                 Map.of("text", "第一版正文")));
         model.responses.add(() -> new ToolUseBlock("commit-invalid", "commit_chapter",
@@ -204,24 +207,17 @@ class AgentScopeHitlFlowTest {
                                 """)));
         var initial = runner.run(task.id()).collectList().block(Duration.ofSeconds(20));
         String runId = initial.getFirst().getRunId();
-        String sessionId = runtime.find(runId).threadId();
         String stageId = workspace.findOpenChapterStage(task.id()).stageId();
-        model.responses.add(() -> TextBlock.builder().text("章节提交完成").build());
 
-        var resumed = runner.resume(task.id(), runId,
+        assertThatThrownBy(() -> runner.resume(task.id(), runId,
                         List.of(new AgentRunDecision("commit-invalid", true)))
-                .collectList().block(Duration.ofSeconds(20));
-
-        assertThat(resumed).noneMatch(AguiEvent.RunError.class::isInstance)
-                .allMatch(event -> runId.equals(event.getRunId()) && sessionId.equals(event.getThreadId()));
-        assertThat(workspace.readChapterStage(task.id(), stageId)).contains("\"COMMITTED\"");
-        assertThat(workspace.findOpenChapterStage(task.id())).isNull();
-        assertThat(workspace.listContents(task.id())).hasSize(1);
-        assertThat(runtime.find(runId).status()).isEqualTo(AgentRunStatus.FINISHED);
-        assertThat(runtime.find(runId).pendingInterrupts()).isEmpty();
-        assertThat(toolResults(runId)).filteredOn(result -> "commit-invalid".equals(result.getId()))
-                .singleElement().satisfies(result -> assertThat(result.getState()).isEqualTo(ToolResultState.SUCCESS));
-        assertThat(toolCalls(runId)).noneMatch(call -> call.getState() == ToolCallState.ASKING);
+                .collectList().block(Duration.ofSeconds(20)))
+                .hasMessageContaining("待确认的 commit_chapter 与当前 ChapterStage 不一致");
+        assertThat(workspace.readChapterStage(task.id(), stageId)).contains("\"AWAITING_REVIEW\"");
+        assertThat(workspace.listContents(task.id())).isEmpty();
+        assertThat(runtime.find(runId).status()).isEqualTo(AgentRunStatus.AWAITING_CONFIRM);
+        assertThat(toolCalls(runId)).filteredOn(call -> call.getState() == ToolCallState.ASKING)
+                .extracting(ToolUseBlock::getId).containsExactly("commit-invalid");
     }
 
     private void enqueueCandidate(String id, String text) {

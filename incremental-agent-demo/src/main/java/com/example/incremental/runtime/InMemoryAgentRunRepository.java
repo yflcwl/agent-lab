@@ -19,7 +19,7 @@ public class InMemoryAgentRunRepository implements AgentRunRepository {
     public synchronized void create(AgentRunContext run, String userId, String agentId, String title, String message) {
         Instant now = Instant.now();
         if (runs.putIfAbsent(run.runId(), new AgentRunRecord(run.runId(), run.correlationId(), run.threadId(),
-                AgentRunStatus.CREATED, List.of(), now, now, 0)) != null) {
+                AgentRunStatus.CREATED, List.of(), null, now, now, 0)) != null) {
             throw new IllegalStateException("Run 已存在: " + run.runId());
         }
     }
@@ -48,11 +48,13 @@ public class InMemoryAgentRunRepository implements AgentRunRepository {
 
     @Override
     public synchronized void transition(AgentRunRecord expected, AgentRunStatus status,
-                                        List<AgentRunInterrupt> interrupts, String errorCode, String errorMessage) {
+                                        List<AgentRunInterrupt> interrupts, RunCheckpoint checkpoint,
+                                        String errorCode, String errorMessage) {
         if (find(expected.runId()).lockVersion() != expected.lockVersion()) {
             throw new IllegalStateException("Run 状态已被其他请求修改，请重新读取");
         }
         runs.put(expected.runId(), new AgentRunRecord(expected.runId(), expected.correlationId(), expected.threadId(),
-                status, List.copyOf(interrupts), expected.createdAt(), Instant.now(), expected.lockVersion() + 1));
+                status, List.copyOf(interrupts), checkpoint,
+                expected.createdAt(), Instant.now(), expected.lockVersion() + 1));
     }
 }

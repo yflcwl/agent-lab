@@ -64,4 +64,16 @@ public class AgentExecutor {
         return writingAgent.resumeRound(task, run.threadId(), run.runId(), resume, Map.copyOf(toolCallIds),
                 toolContext, resumeMessage);
     }
+
+    public Flux<AguiEvent> resumePaused(
+            AgentRunContext run,
+            WritingTask task,
+            WritingRunCommand command,
+            WritingToolContext toolContext) {
+        return writingAgent.resumePausedRound(task, run.threadId(), run.runId(), command, toolContext);
+    }
+
+    public void requestPause(AgentRunContext run, WritingTask task) {
+        writingAgent.requestPause(task, run.threadId());
+    }
 }

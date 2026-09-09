@@ -48,9 +48,6 @@ public class WritingWorkflow {
             throw new IllegalArgumentException("单条消息不能超过 4000 个字符");
         }
         ChapterStage stage = findOpenStage(taskId);
-        if (stage != null && stage.status() == ChapterStageStatus.AWAITING_REVIEW) {
-            throw new IllegalStateException("当前 ChapterStage 正在等待用户审核，请通过 resume 完成本次确认");
-        }
         int sequence = stage == null ? taskView.contents().size() + 1 : stage.content().sequence();
         WritingRunCommand command = stage == null
                 ? WritingRunCommand.writeChapter(message)
@@ -71,6 +68,21 @@ public class WritingWorkflow {
                 new WritingToolContext(taskId, stage), null);
     }
 
+    public PreparedRun preparePausedRun(String taskId, AgentRunContext run) {
+        if (!taskId.equals(run.correlationId())) {
+            throw new IllegalArgumentException("暂停 Run 不属于当前 WritingTask");
+        }
+        WritingTask task = workspaceService.getTaskView(taskId).task();
+        ChapterStage stage = findOpenStage(taskId);
+        WritingRunCommand command = stage == null
+                ? WritingRunCommand.resumePaused()
+                : stage.isComplete()
+                        ? WritingRunCommand.requestChapterCommit(stage.stageId())
+                        : WritingRunCommand.recoverStage(stage.stageId());
+        return new PreparedRun(task, run.threadId(), command,
+                new WritingToolContext(taskId, stage), null);
+    }
+
     public ChapterStage findOpenStage(String taskId) {
         return chapterStageCoordinator.findOpenStage(taskId);
     }
@@ -85,6 +97,13 @@ public class WritingWorkflow {
             return new AgentResumeInput(task, new WritingToolContext(taskId, stage), "", null);
         }
         requireAwaitingReview(stage);
+        boolean mismatchedStage = reviews.stream().anyMatch(review -> {
+            Object reference = review.toolInput() == null ? null : review.toolInput().get("stage_id");
+            return reference != null && !stage.stageId().equals(reference);
+        });
+        if (mismatchedStage) {
+            throw new IllegalStateException("待确认的 commit_chapter 与当前 ChapterStage 不一致");
+        }
         List<AgentRunDecision> reviewDecisions = decisions.stream()
                 .filter(decision -> reviews.stream().anyMatch(review -> review.toolCallId().equals(decision.toolCallId())))
                 .toList();

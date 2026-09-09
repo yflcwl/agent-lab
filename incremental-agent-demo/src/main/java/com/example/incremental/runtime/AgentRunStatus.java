@@ -3,6 +3,7 @@ package com.example.incremental.runtime;
 public enum AgentRunStatus {
     CREATED,
     RUNNING,
+    PAUSED,
     AWAITING_CONFIRM,
     RESUMING,
     FINISHED,
@@ -10,7 +11,7 @@ public enum AgentRunStatus {
     CANCELLED;
 
     public boolean terminal() {
-        return this == FINISHED || this == ERROR || this == CANCELLED;
+        return this == FINISHED || this == CANCELLED;
     }
 }
 

@@ -48,6 +48,8 @@ public class PgVectorPersistenceConfiguration {
                     .execute(pgVectorDataSource);
             new ResourceDatabasePopulator(new ClassPathResource("db/migration/V3__chapter_stage.sql"))
                     .execute(pgVectorDataSource);
+            new ResourceDatabasePopulator(new ClassPathResource("db/migration/V4__cooperative_pause.sql"))
+                    .execute(pgVectorDataSource);
             JdbcTemplate jdbc = new JdbcTemplate(pgVectorDataSource);
             Boolean hasMessageRunForeignKey = jdbc.queryForObject("""
                     SELECT EXISTS (

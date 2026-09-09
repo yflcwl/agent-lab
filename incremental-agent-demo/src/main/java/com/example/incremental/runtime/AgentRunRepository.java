@@ -13,5 +13,5 @@ public interface AgentRunRepository {
     AgentRunRecord findAwaitingConfirmation(String correlationId);
 
     void transition(AgentRunRecord expected, AgentRunStatus status, List<AgentRunInterrupt> interrupts,
-                    String errorCode, String errorMessage);
+                    RunCheckpoint checkpoint, String errorCode, String errorMessage);
 }

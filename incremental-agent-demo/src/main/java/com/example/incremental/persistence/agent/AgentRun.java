@@ -38,6 +38,8 @@ public class AgentRun {
     private String threadId;
     @TableField(value = "pending_interrupts", typeHandler = JsonbStringTypeHandler.class)
     private String pendingInterruptsJson;
+    @TableField(value = "checkpoint", typeHandler = JsonbStringTypeHandler.class)
+    private String checkpointJson;
     @TableField("lock_version")
     private long lockVersion;
 
@@ -47,7 +49,7 @@ public class AgentRun {
     public AgentRun(String id, String conversationId, String agentId, String triggerMessageId,
                     AgentRunStatus status, String errorCode, String errorMessage, Instant startedAt,
                     Instant finishedAt, Instant createdAt, Instant updatedAt, String correlationId,
-                    String threadId, String pendingInterruptsJson, long lockVersion) {
+                    String threadId, String pendingInterruptsJson, String checkpointJson, long lockVersion) {
         this.id = id;
         this.conversationId = conversationId;
         this.agentId = agentId;
@@ -62,6 +64,7 @@ public class AgentRun {
         this.correlationId = correlationId;
         this.threadId = threadId;
         this.pendingInterruptsJson = pendingInterruptsJson;
+        this.checkpointJson = checkpointJson;
         this.lockVersion = lockVersion;
     }
 
@@ -93,6 +96,8 @@ public class AgentRun {
     public void setThreadId(String threadId) { this.threadId = threadId; }
     public String getPendingInterruptsJson() { return pendingInterruptsJson; }
     public void setPendingInterruptsJson(String pendingInterruptsJson) { this.pendingInterruptsJson = pendingInterruptsJson; }
+    public String getCheckpointJson() { return checkpointJson; }
+    public void setCheckpointJson(String checkpointJson) { this.checkpointJson = checkpointJson; }
     public long getLockVersion() { return lockVersion; }
     public void setLockVersion(long lockVersion) { this.lockVersion = lockVersion; }
 
@@ -110,5 +115,6 @@ public class AgentRun {
     public String correlationId() { return correlationId; }
     public String threadId() { return threadId; }
     public String pendingInterruptsJson() { return pendingInterruptsJson; }
+    public String checkpointJson() { return checkpointJson; }
     public long lockVersion() { return lockVersion; }
 }

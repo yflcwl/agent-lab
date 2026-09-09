@@ -70,6 +70,13 @@ public class AgentScopeWritingAgent implements WritingAgent {
             目标 ChapterStage：%s。先调用 read_staged_chapter 核对候选正文，然后只调用 commit_chapter 请求用户审核，并在调用中携带章节记忆、滚动状态和临时计划。目标 Stage 由当前 Run 上下文绑定。不得改写正文，不接收也不处理新的用户写作要求。
             """;
 
+    private static final String RESUME_PAUSED_REQUEST = """
+            执行内部命令：RESUME_PAUSED。
+
+            从当前 Session 已保存的状态继续同一个 Run。不要开始下一章，也不要重复已经完成的 Tool；
+            如果暂停前的章节已经提交或本轮工作已经完成，只需确认当前 Run 已完成。
+            """;
+
     private final HarnessAgent agent;
     private final AguiAgentAdapter adapter;
     private final AguiAdapterConfig adapterConfig;
@@ -121,6 +128,7 @@ public class AgentScopeWritingAgent implements WritingAgent {
         String request = switch (command.type()) {
             case RECOVER_STAGE -> recoveryRequest(command, toolContext);
             case REQUEST_CHAPTER_COMMIT -> requestChapterCommit(command, toolContext);
+            case RESUME_PAUSED -> RESUME_PAUSED_REQUEST;
             case WRITE_CHAPTER -> ROUND_REQUEST.formatted(
                     command.userMessage().isBlank()
                             ? "没有补充要求，请按当前临时章节计划继续。"
@@ -136,6 +144,12 @@ public class AgentScopeWritingAgent implements WritingAgent {
         return adapter.run(input, runtimeContext)
                 .map(AgentScopeWritingAgent::expandSubagentRawEvent)
                 .doFinally(signal -> agent.clearStateCache(task.userId(), chapterSessionId));
+    }
+
+    @Override
+    public void requestPause(WritingTask task, String chapterSessionId) {
+        agent.getDelegate().interrupt(task.userId(), chapterSessionId, UserMessage.builder()
+                .build());
     }
 
     private String recoveryRequest(WritingRunCommand command, WritingToolContext toolContext) {

@@ -25,5 +25,17 @@ public interface WritingAgent {
             Map<String, String> resumeToolCallIds,
             WritingToolContext toolContext,
             String message);
+
+    default Flux<AguiEvent> resumePausedRound(
+            WritingTask task,
+            String chapterSessionId,
+            String runId,
+            WritingRunCommand command,
+            WritingToolContext toolContext) {
+        return streamRound(task, chapterSessionId, runId, command, toolContext);
+    }
+
+    default void requestPause(WritingTask task, String chapterSessionId) {
+    }
 }
 

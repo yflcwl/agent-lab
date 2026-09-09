@@ -10,10 +10,25 @@ export interface WritingTask {
     createdAt: string | number;
 }
 
+export type TaskStatus = "RUNNING" | "PAUSE_REQUESTED" | "PAUSED" | "RESUMING"
+    | "COMPLETED" | "FAILED" | "CANCELLED";
+
+export interface TaskControl {
+    taskId: string;
+    status: TaskStatus;
+    activeRunId?: string | null;
+    createdAt: string | number;
+    updatedAt: string | number;
+    lockVersion: number;
+}
+
 export interface WritingTaskView {
     task: WritingTask;
     sources: string[];
     contents: ContentEntry[];
+    status: TaskStatus;
+    activeRunId?: string | null;
+    updatedAt: string | number;
 }
 
 export interface AgentRunInterrupt {
